@@ -1,54 +1,84 @@
 package dev.aeronauticssimwheel.gametest;
 
+import com.simibubi.create.content.redstone.link.LinkBehaviour;
+import com.simibubi.create.content.redstone.link.RedstoneLinkBlockEntity;
+import dev.aeronauticssimwheel.content.SimChannel;
+import dev.aeronauticssimwheel.content.SimControlBlockEntity;
 import dev.simulated_team.simulated.content.blocks.physics_assembler.PhysicsAssemblerBlockEntity;
-import dev.simulated_team.simulated.content.blocks.steering_wheel.SteeringWheelBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestAssertException;
 import net.minecraft.gametest.framework.GameTestHelper;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 
+import java.util.UUID;
+
 /**
- * Headless in-game verification of the MVP contract, run on a real server with
- * Create + Simulated + Offroad + Sable loaded ({@code ./gradlew :mod:runGameTest}).
+ * Headless in-game verification on a real server with Create + Simulated +
+ * Offroad + Sable loaded ({@code ./gradlew :mod:runGameTest}).
  *
- * <p>These tests exercise the exact server-side effect our client injector's
- * {@code SteeringWheelPacket(false, angle, pos)} has — the packet handler does
- * nothing but {@code be.targetAngleToUpdate = angle; be.startHolding()} — and
- * the primary test vehicle (testdata race car) assembling into a physics craft.
+ * <p>Covers the §5.3b decision: the SimControl block is the only control path,
+ * transmitting analog 0–15 on Create redstone-link frequencies. The race car
+ * assembly test keeps the primary test vehicle exercising physics.
  */
 @GameTestHolder(dev.aeronauticssimwheel.AeronauticsSimwheel.MOD_ID)
 public class SimWheelGameTests {
 
-
     /**
-     * Injecting a target angle must slew the kinetic wheel at the fixed 16 RPM
-     * (4.8°/tick), not snap — this is the latency model the whole FFB sync-spring
-     * design (DESIGN.md §6.5) is built around.
+     * The Tier-1 analog chain end to end with real Create networking: a bound
+     * steering channel must reach a real redstone-link receiver on the same
+     * frequency at proportional 0–15 levels, and input timeout must neutralize.
      */
-    @GameTest(template = "steering_rig", timeoutTicks = 200)
+    @GameTest(template = "control_rig", timeoutTicks = 200)
     @PrefixGameTestTemplate(false)
-    public static void steering_wheel_follows_injected_target(GameTestHelper helper) {
-        SteeringWheelBlockEntity wheel = findBlockEntity(helper, SteeringWheelBlockEntity.class, 5, 5, 5);
-        helper.assertTrue(Math.abs(wheel.getAngle()) < 0.01f, "wheel must start centered");
+    public static void sim_control_transmits_analog_levels(GameTestHelper helper) {
+        SimControlBlockEntity control = findBlockEntity(helper, SimControlBlockEntity.class, 5, 5, 5);
+        BlockPos linkRel = findBlockEntityPos(helper, RedstoneLinkBlockEntity.class, 5, 5, 5);
+        RedstoneLinkBlockEntity link = (RedstoneLinkBlockEntity)
+                helper.getLevel().getBlockEntity(helper.absolutePos(linkRel));
 
-        // Exactly what SteeringWheelPacket.handle() does server-side:
-        wheel.targetAngleToUpdate = 90f;
-        wheel.startHolding();
+        // Bind both ends to the same red-wool pair. The receiver side goes through
+        // Create's own public API (self-registers in the network); the template's
+        // frequency NBT is not relied on.
+        control.bindChannel(SimChannel.STEER_RIGHT,
+                new ItemStack(Items.RED_WOOL), new ItemStack(Items.RED_WOOL));
+        UUID driver = UUID.randomUUID();
 
-        // Mid-slew (tick 10): ~4.8°/tick → ~48°, definitely neither 0 nor 90.
-        helper.runAtTickTime(10, () -> {
-            float a = Math.abs(wheel.getAngle());
-            helper.assertTrue(a > 20f && a < 80f,
-                    "wheel must slew at 16 RPM, was at " + wheel.getAngle() + "° after 10 ticks");
+        helper.runAtTickTime(2, () -> {
+            LinkBehaviour receiver = link.getBehaviour(LinkBehaviour.TYPE);
+            helper.assertTrue(receiver != null, "template link must have a LinkBehaviour");
+            receiver.setFrequency(true, new ItemStack(Items.RED_WOOL));
+            receiver.setFrequency(false, new ItemStack(Items.RED_WOOL));
         });
 
-        // Converged: |angle| = 90 within tolerance and holds there.
-        helper.runAtTickTime(40, () -> {
-            float a = Math.abs(wheel.getAngle());
-            helper.assertTrue(Math.abs(a - 90f) < 2f,
-                    "wheel must reach the 90° target, was at " + wheel.getAngle() + "°");
+        helper.runAtTickTime(5, () -> control.applyInput(driver, 1.0f, 0f, 0f, 0));
+        helper.runAtTickTime(8, () -> helper.assertTrue(link.getReceivedSignal() == 15,
+                "full right steer must reach the receiver as 15, got " + link.getReceivedSignal()));
+
+        helper.runAtTickTime(10, () -> control.applyInput(driver, 0.5f, 0f, 0f, 0));
+        helper.runAtTickTime(13, () -> {
+            StringBuilder net = new StringBuilder();
+            com.simibubi.create.Create.REDSTONE_LINK_NETWORK_HANDLER
+                    .getNetworkOf(helper.getLevel(), link.getBehaviour(LinkBehaviour.TYPE))
+                    .forEach(m -> net.append(m.getClass().getSimpleName())
+                            .append('=').append(m.getTransmittedStrength()).append(' '));
+            helper.assertTrue(link.getReceivedSignal() == 8,
+                    "half steer must arrive analog (round(0.5*15)=8), got " + link.getReceivedSignal()
+                            + " network[" + net + "]");
+        });
+
+        helper.runAtTickTime(15, () -> control.applyInput(driver, -1.0f, 0f, 0f, 0));
+        helper.runAtTickTime(18, () -> helper.assertTrue(link.getReceivedSignal() == 0,
+                "left steer must zero the right channel, got " + link.getReceivedSignal()));
+
+        // No further input frames: the 30-tick timeout must neutralize the channel
+        helper.runAtTickTime(20, () -> control.applyInput(driver, 1.0f, 0f, 0f, 0));
+        helper.runAtTickTime(60, () -> {
+            helper.assertTrue(link.getReceivedSignal() == 0,
+                    "input silence must neutralize (timeout), got " + link.getReceivedSignal());
             helper.succeed();
         });
     }
@@ -62,7 +92,7 @@ public class SimWheelGameTests {
     @GameTest(template = "race_car", timeoutTicks = 400)
     @PrefixGameTestTemplate(false)
     public static void race_car_assembles_into_physics_craft(GameTestHelper helper) {
-        BlockPos assemblerPos = findAssembler(helper);
+        BlockPos assemblerPos = findBlockEntityPos(helper, PhysicsAssemblerBlockEntity.class, 9, 4, 5);
         PhysicsAssemblerBlockEntity assembler = (PhysicsAssemblerBlockEntity)
                 helper.getLevel().getBlockEntity(helper.absolutePos(assemblerPos));
 
@@ -76,10 +106,6 @@ public class SimWheelGameTests {
 
         // Survive real physics: rapier natives, suspension raycasts, drivetrain.
         helper.runAtTickTime(115, helper::succeed);
-    }
-
-    private static BlockPos findAssembler(GameTestHelper helper) {
-        return findBlockEntityPos(helper, PhysicsAssemblerBlockEntity.class, 9, 4, 5);
     }
 
     private static <T> T findBlockEntity(GameTestHelper helper, Class<T> type, int sx, int sy, int sz) {

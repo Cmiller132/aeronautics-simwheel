@@ -55,7 +55,7 @@ public final class FfbController {
     }
 
     /** Game thread, once per client tick: publish inputs for the FFB thread. */
-    public void updateFromGame(Minecraft mc, WheelInput input, SteeringWheelLink link) {
+    public void updateFromGame(Minecraft mc, WheelInput input, SimControlLink link) {
         boolean engaged = link.isEngaged() && input.hasInput();
 
         if (engaged != wasEngaged) {

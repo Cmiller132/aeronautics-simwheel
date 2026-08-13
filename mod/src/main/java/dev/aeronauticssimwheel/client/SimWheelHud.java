@@ -13,10 +13,10 @@ import net.minecraft.client.gui.LayeredDraw;
 public final class SimWheelHud implements LayeredDraw.Layer {
 
     private final WheelInput input;
-    private final SteeringWheelLink link;
+    private final SimControlLink link;
     private final FfbController ffb;
 
-    public SimWheelHud(WheelInput input, SteeringWheelLink link, FfbController ffb) {
+    public SimWheelHud(WheelInput input, SimControlLink link, FfbController ffb) {
         this.input = input;
         this.link = link;
         this.ffb = ffb;

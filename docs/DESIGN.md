@@ -235,27 +235,46 @@ Simulated `linked_typewriter/*`, Tweaked Controllers as prior art):
    (key → frequency-pair map), so a wheel can auto-bind to an existing car
    with zero configuration.
 
-**The Virtual Linked Controller**, layered by what's installed:
+**DECIDED (2026-08-13, superseding the tier ladder below): the SimWheel
+Control Block is the ONLY control path.** After reviewing the study, the
+user chose to drop ALL compat layers — no SteeringWheelPacket injection into
+Simulated's wheel, no typewriter/lectern packet piggybacking, no per-player
+phantom transmitters. Sim hardware talks exclusively to our own block, which
+is the analog *controller* for the existing link wiring:
 
-- **Tier 0 — vanilla servers (digital, works today):** engage on a
-  typewriter/lectern like a player would; the mod speaks the controller's own
-  packets (`TypewriterKeyInteractionPacket` press/release; Create's
-  `LinkedControllerInputPacket` with lecternPos) mapping wheel/pedal axes
-  through thresholds with hysteresis. Steering stays bang-bang because the
-  craft was built bang-bang — but hands go on a real wheel, and FFB runs in
-  chassis-synthesized mode (§6.7).
-- **Tier 1 — our server addon (analog on the same wires):** a per-player
-  server-side transmitter set (our own `IRedstoneLinkable`s, modeled on
-  Tweaked's axis entries) fed by a float C2S packet, transmitting analog 0–15
-  on the frequencies the craft already uses (auto-bound from the typewriter,
-  or bound via item UI). Wheel mounts steered through link receivers then get
-  their full ±15-step resolution proportionally — with existing blocks only.
-  Max-combining means a physically pressed key (15) dominates our analog
-  level while held; that is acceptable (the engaged driver isn't typing) and
-  cross-player interference is inherent to link frequencies.
-- **Tier 2 — float precision:** the §5.5 custom block path, unchanged; the
-  16-levels-per-direction cap is the medium's limit, not fixable by any
-  controller.
+- **`aeronautics_simwheel:sim_control`** — placed in the craft like a
+  typewriter would be. **Occupancy: seated** — the block binds to a nearby
+  Create seat; only the seated player can engage. **Channels: fixed sim
+  set** — `STEER_LEFT`/`STEER_RIGHT` (analog pair, split from the signed
+  steering axis like the A/D convention), `THROTTLE`, `BRAKE` (analog 0–15),
+  plus a small set of digital button channels — each channel holding a
+  frequency item-pair (typewriter idiom). **Output: link frequencies only**
+  in v1 — builders wire `create:redstone_link` receivers exactly as they do
+  for a typewriter, but receive proportional 0–15 instead of bang-bang.
+  **Visual: a look-alike sibling of Simulated's steering wheel** (our own
+  geometry, matching their aesthetic), mirroring the driver's hardware angle
+  and FFB back-drive; placeholder model until the art pass.
+- Client → server: one float-precision input packet (steering −1…1, throttle,
+  brake 0…1, button mask) at ≤20 Hz on change; the BE quantizes to 0–15,
+  maintains its `IRedstoneLinkable` entries in Create's link network handler,
+  and calls `updateNetworkOf` on change. Input timeout (30 ticks, matching
+  the linked-controller convention) zeroes all channels — control loss is
+  neutral, never latched.
+- The BE is the FFB telemetry attach point (§6.3) and the future float
+  drive-by-wire seam; the 16-levels-per-direction link cap is accepted for
+  v1 (it is the medium's own resolution).
+- **Consequence, accepted**: the mod must be installed on the server to
+  drive anything. The zero-addon compat story is gone by explicit decision.
+- Link-craft FFB default: chassis feedback **off** (user decision) — the
+  wheel carries damper/detents locally until real telemetry sources exist.
+
+*(Historical context — the tier ladder as studied, kept for the record:)*
+
+- Tier 0 (digital injection via typewriter/lectern packets) and per-player
+  Tier 1 phantom transmitters were designed but **dropped** by the decision
+  above. The study's mechanics (analog links, max-combining, public
+  transmit seam, flicker-score gotcha) all still apply to the block's
+  implementation.
 
 ### 5.4 Throttle injection
 

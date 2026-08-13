@@ -3,10 +3,13 @@ package dev.aeronauticssimwheel;
 import com.mojang.logging.LogUtils;
 import dev.aeronauticssimwheel.client.SimWheelClient;
 import dev.aeronauticssimwheel.gametest.SimWheelGameTests;
+import dev.aeronauticssimwheel.network.SimControlInputPacket;
+import dev.aeronauticssimwheel.registry.SimWheelRegistry;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import org.slf4j.Logger;
 
 /**
@@ -22,7 +25,11 @@ public final class AeronauticsSimwheel {
     public static final Logger LOGGER = LogUtils.getLogger();
 
     public AeronauticsSimwheel(IEventBus modEventBus) {
+        SimWheelRegistry.init(modEventBus);
         modEventBus.addListener(this::onRegisterGameTests);
+        modEventBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1")
+                .playToServer(SimControlInputPacket.TYPE, SimControlInputPacket.CODEC,
+                        SimControlInputPacket::handle));
         if (FMLEnvironment.dist.isClient()) {
             SimWheelClient.init(modEventBus);
         }
