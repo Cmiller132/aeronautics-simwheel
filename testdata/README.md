@@ -33,3 +33,14 @@ What's in it (parsed from the palette + block-entity NBT):
    drives).
 3. As-built it is a good **integration fixture**: assembling it in a dev world
    exercises Simulated + Offroad + physics assembly without any of our code.
+
+## GameTest use (wired up)
+
+`tools/make_test_structures.py` copies this template into
+`mod/src/main/resources/data/aeronautics_simwheel/structure/race_car.nbt` with
+the single `dndecor:lime_large_cogwheel` swapped for `create:large_cogwheel`
+(it sits on the rotation speed controller feeding both directional gearshifts,
+so it is functional, not decor — the swap keeps the drivetrain identical while
+dropping the DnDecor dependency). `./gradlew :mod:runGameTest` then asserts the
+car assembles into a Sable physics craft and survives simulation
+(`SimWheelGameTests.race_car_assembles_into_physics_craft`).

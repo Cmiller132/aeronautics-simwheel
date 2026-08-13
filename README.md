@@ -2,11 +2,19 @@
 
 Sim racing wheel control and **true force feedback** for [Create: Aeronautics / The Simulated Project](https://github.com/Creators-of-Aeronautics/Simulated-Project), targeting the MOZA R9 wheelbase + pedals (and, by extension, any DirectInput/PID force-feedback wheel).
 
-> Status: skeleton implemented — the pure-JVM engine (`engine/`: device HAL + FFB core with safety chain, telemetry buffer, feel components) is unit-tested; the NeoForge mod shell (`mod/`) builds against NeoForge 21.1. Game wiring (Phase 1 input path) is next.
+> Status: **Phase 1 MVP wired and tested in-game (headless).** The pure-JVM engine (`engine/`: device HAL + FFB core with safety chain, telemetry buffer, feel components) is unit-tested; the mod (`mod/`) compiles against the real Create + Simulated + Offroad + Sable stack and implements wheel input → latch-mode `SteeringWheelPacket` injection → client-only FFB feel (sync-spring through the safety chain on a 250 Hz thread). GameTests verify the injected-packet steering contract (16 RPM slew) and that the test race car assembles into a Sable physics craft, on a real headless server.
 > - [`docs/RESEARCH.md`](docs/RESEARCH.md) — technical findings (ecosystem, hardware, FFB routes)
 > - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture & design: module layout, input/FFB pipelines, torque model, safety chain, degraded modes, phased build order
 
 Build: `./gradlew build` (JDK 21). Engine tests only: `./gradlew :engine:test`.
+
+## Running & testing in-game
+
+- `./gradlew :mod:runGameTest` — headless server gametests: steering-wheel packet contract + race-car physics assembly (primary test vehicle: [`testdata/tones_template_race_car.nbt`](testdata/README.md), with the DnDecor cog swapped for `create:large_cogwheel` by `tools/make_test_structures.py`).
+- `./gradlew :mod:runClient` — full dev client with the whole mod stack. In a world: look at a `simulated:steering_wheel` and press **J** to engage/disengage; **K** toggles a hardware-free sine-sweep demo input; a debug HUD shows device, commanded vs. actual wheel angle, and safety-chain torque.
+- `./gradlew :mod:runClientSelftest` — same client, logs SimWheel input/FFB state and quits by itself (CI-ish smoke test).
+
+No FFB hardware output yet (GLFW is input-only; the SDL3 haptics backend is Phase 2) — torque is computed through the real pipeline and shown on the HUD.
 
 ## Goal
 

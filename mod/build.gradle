@@ -10,6 +10,17 @@ java {
 
 repositories {
     mavenCentral()
+    maven { url = 'https://maven.ryanhcode.dev/releases' }  // Simulated, Offroad, Sable, Veil
+    maven { url = 'https://maven.ryanhcode.dev/snapshots' }
+    maven { url = 'https://maven.createmod.net' }           // Create, Ponder, Flywheel
+    maven { url = 'https://mvn.devos.one/snapshots' }       // Registrate
+    maven { url = 'https://maven.blamejared.com' }
+    exclusiveContent {
+        forRepository {
+            maven { url = 'https://api.modrinth.com/maven' }
+        }
+        filter { includeGroup 'maven.modrinth' }
+    }
 }
 
 neoForge {
@@ -19,20 +30,55 @@ neoForge {
         client {
             client()
         }
+        // Boots the full modded client, logs SimWheel input/FFB state, self-quits.
+        clientSelftest {
+            client()
+            systemProperty('simwheel.selftest', '600')
+        }
         server {
             server()
+        }
+        gameTest {
+            type = 'gameTestServer'
+            gameDirectory = project.file('build/gametest')
+            systemProperty('neoforge.enabledGameTestNamespaces', 'aeronautics_simwheel')
         }
     }
 
     mods {
         aeronautics_simwheel {
             sourceSet sourceSets.main
+            // Engine classes must live inside the mod module in dev runs, or the
+            // transforming classloader can't see them (they ship in the jar too).
+            sourceSet project(':engine').sourceSets.main
         }
     }
 }
 
 dependencies {
     implementation project(':engine')
+
+    // The target stack: Create: Simulated + Create: Offroad and their requirements.
+    // Optional integrations (Curios, JEI, CC:Tweaked, compasses) are excluded —
+    // they are not `required` in either mods.toml and just bloat the dev runtime.
+    def optionalIntegrations = { dep ->
+        dep.exclude group: 'top.theillusivec4.curios'
+        dep.exclude group: 'mezz.jei'
+        dep.exclude group: 'cc.tweaked'
+        dep.exclude group: 'maven.modrinth'
+    }
+    implementation('dev.simulated_team.simulated:simulated-neoforge-1.21.1:1.3.0') { optionalIntegrations(it) }
+    implementation('dev.ryanhcode.offroad:offroad-neoforge-1.21.1:1.3.0') { optionalIntegrations(it) }
+    implementation('dev.ryanhcode.sable:sable-neoforge-1.21.1:2.0.0') {
+        exclude group: 'foundry.veil'
+        exclude group: 'com.tterrag.registrate'
+    }
+    implementation('foundry.veil:veil-neoforge-1.21.1:4.0.1') {
+        exclude group: 'maven.modrinth'
+    }
+    implementation('com.simibubi.create:create-1.21.1:6.0.10-280') { transitive = false }
+    implementation('net.createmod.ponder:ponder-neoforge:1.0.81+mc1.21.1')
+    implementation('dev.engine-room.flywheel:flywheel-neoforge-1.21.1:1.0.6')
 }
 
 // The engine classes ship inside the mod jar (single artifact, DESIGN.md §4)

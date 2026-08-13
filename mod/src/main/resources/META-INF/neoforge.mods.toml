@@ -23,3 +23,26 @@ type = "required"
 versionRange = "[1.21.1]"
 ordering = "NONE"
 side = "BOTH"
+
+[[dependencies.aeronautics_simwheel]]
+modId = "create"
+type = "required"
+versionRange = "[6.0.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+[[dependencies.aeronautics_simwheel]]
+modId = "simulated"
+type = "required"
+versionRange = "[1.3.0,)"
+ordering = "AFTER"
+side = "BOTH"
+
+# Not referenced in code — the ground-vehicle FFB target (wheel mounts) and the
+# test race car live there, but the mod runs fine without it.
+[[dependencies.aeronautics_simwheel]]
+modId = "offroad"
+type = "optional"
+versionRange = "[1.3.0,)"
+ordering = "AFTER"
+side = "BOTH"
