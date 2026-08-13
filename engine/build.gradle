@@ -1,0 +1,31 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // GLFW comes from LWJGL, not Minecraft — allowed in hal/ (DESIGN.md §4).
+    // compileOnly: at runtime Minecraft's own LWJGL provides it; tests never touch it.
+    compileOnly 'org.lwjgl:lwjgl-glfw:3.3.3'
+
+    testImplementation platform('org.junit:junit-bom:5.10.2')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}

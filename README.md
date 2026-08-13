@@ -2,7 +2,11 @@
 
 Sim racing wheel control and **true force feedback** for [Create: Aeronautics / The Simulated Project](https://github.com/Creators-of-Aeronautics/Simulated-Project), targeting the MOZA R9 wheelbase + pedals (and, by extension, any DirectInput/PID force-feedback wheel).
 
-> Status: research complete, implementation not started. See [`docs/RESEARCH.md`](docs/RESEARCH.md) for the full technical findings this plan is based on.
+> Status: skeleton implemented — the pure-JVM engine (`engine/`: device HAL + FFB core with safety chain, telemetry buffer, feel components) is unit-tested; the NeoForge mod shell (`mod/`) builds against NeoForge 21.1. Game wiring (Phase 1 input path) is next.
+> - [`docs/RESEARCH.md`](docs/RESEARCH.md) — technical findings (ecosystem, hardware, FFB routes)
+> - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture & design: module layout, input/FFB pipelines, torque model, safety chain, degraded modes, phased build order
+
+Build: `./gradlew build` (JDK 21). Engine tests only: `./gradlew :engine:test`.
 
 ## Goal
 
@@ -28,10 +32,13 @@ Nothing in the Minecraft ecosystem does true wheel FFB today (existing controlle
 
 ## Roadmap
 
-1. **Phase 0 — validate with existing mods (no code).** Use [Create: Tweaked Controllers](https://github.com/getItemFromBlock/Create-Tweaked-Controllers) (explicitly compatible with Create: Simulated) to map the R9's axes onto link channels and fly something. Learn what feels wrong.
-2. **Phase 1 — input addon.** Client mod reading the wheel via GLFW and injecting analog values into the `SteeringWheelPacket` / throttle path. Binding UI, deadzones, axis curves.
-3. **Phase 2 — FFB v1.** Server-side `BlockEntitySubLevelActor` attachment computes steering torque from Sable's `RigidBodyHandle` state (hinge moment ≈ deflection × dynamic pressure × area, plus damping); telemetry to client each tick; dedicated FFB thread upsamples to ~200 Hz and updates one infinite-duration SDL3 constant-force effect in place. Requires porting `SDL_haptic.h` into a Java SDL3 binding (small, well-scoped).
-4. **Phase 3 — FFB v2.** Stall buffet, ground/landing effects, per-craft tuning, multiplayer telemetry packets, optional native 1 kHz helper process, optional MOZA SDK extras (LEDs, per-craft wheel rotation limits).
+See [`docs/DESIGN.md` §11](docs/DESIGN.md) for the full phase plan with exit criteria. In short:
+
+1. **Phase 0 — feel scouting (no code).** Fly with [Create: Tweaked Controllers](https://github.com/getItemFromBlock/Create-Tweaked-Controllers) to learn what feels wrong.
+2. **Phase 1 — input (GLFW, client-only).** Analog steering + throttle via the mod's own packets; binding/calibration UI; works on servers without the addon.
+3. **Phase 2 — FFB core.** `SDL_haptic` port, dedicated FFB thread + safety chain, server-side rig resolution reading the **actual hinge constraint reaction torque** from Sable's solver (`getJointImpulses` on the swivel bearing's `RotaryConstraintHandle`), telemetry, sync-spring + damper feel.
+4. **Phase 3 — feel & degraded modes.** Buffet, ground rumble, detents; aero-model + craft-state fallback sources; client-estimated FFB on vanilla servers; craft profiles.
+5. **Phase 4 — public release.** API freeze, docs, packaging, upstream contributions (analog throttle block, libsdl4j haptics PR).
 
 ## Safety (direct-drive wheels can hurt you)
 
@@ -43,9 +50,10 @@ The R9 is a 9 Nm direct-drive base. Non-negotiable rules for the FFB output path
 
 ## Key injection points in Simulated-Project (verified against source, v1.3.0)
 
-- `content/blocks/steering_wheel/SteeringWheelHandler.java` — client-side; accumulates a float angle from mouse movement and sends `SteeringWheelPacket(boolean shouldStop, float targetAngle, BlockPos pos)` via Veil networking. **Feed the wheel axis here.**
+- `content/blocks/steering_wheel/SteeringWheelHandler.java` — client-side; accumulates a float angle from mouse movement and sends `SteeringWheelPacket(boolean shouldStop, float targetAngle, BlockPos pos)` via Veil networking. **Feed the wheel axis here.** (The block entity is a kinetic *generator* that chases the target at a fixed 16 RPM — the design's sync-spring renders that slew as FFB resistance.)
 - `network/packets/ThrottleLeverSignalPacket(BlockPos, int signal)` — throttle is 0–15 quantized; pedals may deserve a custom analog input block instead.
-- Sable: `RigidBodyHandle.of(ServerSubLevel)` → `getLinearVelocity`, `getAngularVelocity`, `applyTorqueImpulse`, …; `BlockEntitySubLevelActor.sable$physicsTick(...)` for per-physics-step hooks; `SubLevelHelper.getVelocityRelativeToAir(...)` for airspeed.
+- `content/blocks/swivel_bearing/SwivelBearingBlockEntity` — control surfaces hinge on a Sable `RotaryConstraintHandle` driven as a PD servo from the kinetic network. **`getJointImpulses(...)` on that handle is the physically-true hinge moment — the primary FFB torque source.**
+- Sable: `SablePre/PostPhysicsTickEvent` for substep-rate sampling; `RigidBodyHandle.of(ServerSubLevel)` → `getLinearVelocity`, `getAngularVelocity`, …; `SubLevelHelper.getVelocityRelativeToAir(...)` for airspeed; `BlockSubLevelLiftProvider` holds the game's exact sail lift/drag math for the fallback torque model.
 
 ## License
 
