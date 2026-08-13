@@ -19,11 +19,13 @@ What's in it (parsed from the palette + block-entity NBT):
 
 ## Why it matters for SimWheel
 
-1. **Evidence for the §6.7 Offroad question**: at least this build style steers
-   non-physically (differential redstone), so ground-vehicle FFB would come from
-   `CraftStateSource` synthesis, not joint impulses. Whether `wheel_mount`
-   internally uses a Sable constraint (suspension) that our rig resolver could
-   also read remains to be verified in the Offroad source.
+1. **Offroad internals (since verified from source — DESIGN.md §6.2.4/§6.7)**:
+   wheel mounts are raycast-suspension force emitters with no constraints and no
+   tire colliders; steering is analog redstone on the mount's side faces (±15
+   steps → ±30° lock) — this car doesn't wire that up and instead skid-steers
+   via the `directional_gearshift`. The `ScrollValue: 180` on the mounts is
+   **suspension strength maxed out** (range 5–180), not a steering value.
+   Ground-vehicle FFB comes from `WheelMountSource` synthesis.
 2. **Phase 0/1 test target once retrofitted**: add a `simulated:steering_wheel`
    + a swivel-bearing steering rack (or throttle lever on the engine line) to get
    an analog-steerable variant; keep this original as the control for comparing

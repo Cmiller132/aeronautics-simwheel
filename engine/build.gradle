@@ -29,3 +29,12 @@ test {
         exceptionFormat 'full'
     }
 }
+
+// Headless FFB driving scenario (DESIGN.md §10.5): ./gradlew :engine:drivingDemo
+tasks.register('drivingDemo', JavaExec) {
+    group = 'verification'
+    description = 'Run the race car FFB simulation over block terrain, write CSV trace'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'dev.aeronauticssimwheel.sim.DrivingScenarioDemo'
+    args = [project.layout.buildDirectory.file('driving-sim.csv').get().asFile.path]
+}
