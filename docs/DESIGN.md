@@ -210,15 +210,39 @@ Shared injection details (both modes):
 - Quantization to 16 steps is an upstream reality, not fixable client-side. A custom analog throttle block is explicitly deferred to Phase 4 (needs the server addon and new content; contribution upstream is the better path — tracked as an open question §12).
 - `BRAKE` axis stays unbound in v1 (Simulated/Offroad has no brake input block to feed); reserved in config so bindings don't shuffle later.
 
-### 5.5 Optional custom steering block — decided: later, not v1
+### 5.5 Custom steering block — DECIDED: analog steering wheel variant, Phase 3
 
-A SimWheel-native steering column block (our own content, server addon required) could fix everything the vanilla blocks can't:
+Decision (2026-08-13, after the Phase 1 MVP landed): we build our **own steering
+wheel block** — a drop-in variant of Simulated's, not a full "vehicle control
+unit". Rationale: smallest scope that fixes both real quantization problems
+(16 RPM slew, ±15-step ground steering), keeps builds Create-idiomatic, and
+gives FFB one server-authoritative emitter. The alternatives considered and
+parked: a drive-by-wire ECU block (fixes throttle too, but a much bigger,
+less idiomatic design — revisit after the wheel variant ships), and an
+upgrade-item mixin on the vanilla wheel (schematic-compatible but patches
+their block entity — too fragile across Simulated updates).
 
-- **No 16 RPM slew** — configurable or instant target tracking, so hardware and virtual wheel stay 1:1 without the sync-spring carrying the difference.
-- **True analog throttle** on the same block or a sibling lever (kills the 0–15 quantization at the source).
-- **Server-authoritative back-drive** — the server could turn the block's rendered wheel from the joint torque, so *spectators* see the wheel jerk on a curb strike, which the vanilla one-way chain can never show.
+Behavior spec for `aeronautics_simwheel:sim_steering_wheel`:
 
-It stays out of v1 deliberately: the whole point of the packet-level design is working on **public servers without any addon** (§8), and custom content forfeits that wherever the addon isn't installed. The vanilla-block path also keeps us honest — every feel feature has to work through the real upstream mechanics first. The right sequence is: ship v1 against vanilla blocks, propose an analog throttle upstream (§12), and only add our own block in Phase 3+ if upstream declines — as an *enhancement* with the vanilla path still first-class, never a replacement.
+- **Direct angle authority** — the client packet sets the angle immediately
+  (server clamps rate only for sanity, default 1080°/s, config); no 16 RPM
+  chase, so hardware and in-game wheel stay 1:1 and the sync-spring carries
+  only telemetry torque, not slew lag.
+- **Float steering out** — implements the same `IDirectionalAnalogOutput`
+  contract for vanilla compat (quantized consumers keep working), plus a
+  float-precision side channel: a small mixin on Offroad's wheel-mount
+  steering read (`getSteeringSignal`/`computeYaw`) checks whether the signal
+  source is a `FloatSteeringSource` (our interface, exposed via API for other
+  addons) and uses the exact float when it is. If the mixin target churns
+  upstream, degraded behavior is the vanilla ±15 path — never a crash.
+- **Server-authoritative back-drive** — the server turns the rendered wheel
+  from the resolved FFB torque source, so spectators see the wheel fight on a
+  curb strike; the driver's client still predicts locally.
+- **Telemetry emitter** — the block entity is the canonical attach point for
+  the §6.3 sampler (no rig search needed when present).
+
+The vanilla-packet path (§5.3) stays first-class forever: it is the only path
+on servers without the addon, and every feel feature must work there first.
 
 ---
 
@@ -298,7 +322,43 @@ Mixer: `τ_out = softknee( τ_telemetry + τ_spring + τ_damper + τ_friction + 
 
 Sign convention: positive column torque = clockwise from the pilot's view. Per-rig auto-calibration on first engage ("push test": deflect, compare hinge torque sign against deflection) with a manual invert flag in the profile — never trust geometry inference alone.
 
-### 6.6 Device output
+### 6.6 Device output — DECIDED: MOZA SDK bridge sidecar (Phase 2b)
+
+Decision (2026-08-13): the first hardware backend is a **native sidecar
+process built on the official MOZA SDK** (Windows-only, C++/MSVC or C#, free
+download; provides constant-force + spring/damper/inertia/friction/sine
+effects, cycle-accurate steering angle/velocity/acceleration input, and
+device configuration incl. torque limits, with Pit House SDK-mode discovery).
+The mod talks to it over a tiny localhost-UDP protocol (the irFFB pattern).
+Why a sidecar rather than in-process JNI: a native fault cannot crash
+Minecraft, no LWJGL coexistence questions, the SDK's threading model stays
+isolated, and the §7 watchdog already covers IPC loss — a dead bridge reads
+as "stale input" and torque fades to zero by construction. Why MOZA SDK over
+SDL3/DirectInput first: direct vendor torque path, the base's own
+angle/velocity stream (better than GLFW for the sync-spring's θ̇ term), and
+hardware-side torque-limit enforcement as a second, independent safety layer
+below our SafetyChain. The wire protocol is **backend-agnostic** — an SDL3
+sidecar for non-MOZA wheels (and macOS/Linux) is a later drop-in speaking the
+same frames.
+
+**Bridge wire protocol v1** (implemented in `engine/hal/bridge`, unit-tested;
+the sidecar is the native mirror):
+
+- UDP, localhost only, default port 46910, little-endian, magic `AWFB`,
+  1-byte version, 1-byte frame type, u32 sequence.
+- Mod → bridge `TORQUE` @ device rate (default 150 Hz): f32 torque (Nm,
+  +CW at the rim), f32 max-torque cap (Nm — bridge programs the base's own
+  limit to `min(cap, base limit)`), u16 watchdog ms (bridge zeroes torque
+  itself if no frame arrives within it — safety holds even if the JVM dies).
+- Mod → bridge `PANIC`: immediate zero + effect stop; latched until `START`.
+- Mod → bridge `START` / `STOP`: effect lifecycle (§ lifecycle below).
+- Bridge → mod `STATE` @ ~250 Hz: f32 steering deg, f32 deg/s, u32 buttons,
+  u8 flags (connected, fault, hands-off detect if the base reports it),
+  device id hash. Doubles as the input source on Windows (replaces GLFW when
+  the bridge is up — one device, one truth).
+- Bridge → mod `HELLO` on connect: protocol version, device name, rated
+  torque (R9: 9 Nm) — mismatched version → refuse + HUD warning, never
+  best-effort parsing.
 
 - FFB thread computes at 1 kHz; device writes are coalesced to a configurable 100–200 Hz (default 150) — above that, some PID firmwares choke (SDL issue #12511); the base's own firmware interpolates between updates.
 - Session lifecycle: `ffbStart()` on first engage (effect created at gain 0 → ramp §7), effect persists across engage cycles within a session, `ffbStop()` on device change/quit; `panic()` wired to every abnormal path.
@@ -432,11 +492,64 @@ At startup, reflectively verify every surface in §2 (constructor signatures, fi
 
 **Phase 1 — input (GLFW, client-only).** `hal/glfw` + bindings/calibration UI + engagement state machine + latch-mode steering + throttle hysteresis + HUD. Works on servers without the addon from day one. *Exit: fly a stock Simulated plane start-to-landing on wheel+pedals, on a vanilla server, no keyboard for flight controls.*
 
-**Phase 2 — FFB core.** `SDL_haptic` JNA port; `Sdl3WheelDevice`; FFB thread + buffer + safety chain (fully unit-tested **before** first hardware plug-in); server addon: rig resolver + `JointImpulseSource` + sampler + telemetry; sync-spring & damper. *Exit: hinge-moment torque felt in hand tracking airspeed & deflection; all §7 trips demonstrated on hardware; record/replay harness working.*
+**Phase 2a — telemetry framework, both vehicle classes (Mac-testable, no hardware).**
+Server addon: rig resolver + the 20 Hz `FfbTelemetryPacket` (§6.3) + source
+registry with **both** first sources landing together — `WheelMountSource`
+(ground: the game's own tire/suspension math from wheel-mount state +
+per-block friction + velocity-delta strike detection) and `ServoTorqueSource`
+(air: PD reconstruction on swivel-bearing servos) — one packet format designed
+once. Client: TelemetryBuffer consumes real packets (replacing the client-only
+degraded estimate when present).
+*Test series:* unit tests for both sources against recorded inputs; gametests —
+race car emits plausible ground telemetry while driven over a bump-course
+template (extend the race-car test: power the gearshift, assert non-zero,
+bump-correlated torque samples), swivel-bearing rig emits servo torque tracking
+deflection; determinism test (same tick inputs → same packet).
+*Exit: headless server produces a torque trace for the race car on the bump
+course that the §10.5 report renders and the DrivingScenario regression bounds
+accept.*
 
-**Phase 3 — feel & degraded modes.** Buffet, ground rumble, detents, friction; `AeroModelSource` + `CraftStateSource`; client-estimated fallback FFB; craft profiles; compat health check; Linux pass. *Exit: the §8 matrix demonstrated row by row.*
+**Phase 2b — MOZA bridge sidecar (Windows PC, hardware-in-the-loop).**
+Native sidecar on the MOZA SDK speaking the §6.6 protocol; engine-side
+`BridgeWheelDevice` + codec are pure JVM and land first with a `FakeBridge`
+test double.
+*Test series:* (1) codec round-trip + malformed-frame fuzz (JVM, CI); (2)
+watchdog conformance — kill the fake bridge mid-stream, assert device-side
+zero within watchdog ms and SafetyChain fade, restart → clean re-HELLO; (3)
+bench app on the PC: sine/step/square torque patterns at 150 Hz with the rim
+held, measuring commanded-vs-felt latency (target < 20 ms bridge overhead) and
+verifying the base's hardware torque cap engages independently of ours; (4)
+§7 trip checklist on hardware — ramp-in from zero, clamp at 2.5 Nm (soft-start
+default), 25 Nm/s slew, panic key, JVM kill-switch test (force-quit Minecraft
+mid-torque → bridge watchdog zeroes on its own).
+*Exit: all four series green; a written HIL checklist committed with measured
+numbers.*
 
-**Phase 4 — public release & ecosystem.** `api/` freeze at 1.0, docs site/README rewrite, community profile format, CurseForge/Modrinth packaging, upstream conversations (analog throttle block in Simulated; haptics PR to libsdl4j; optional native 1 kHz helper process evaluation — only if JVM-side quality proves insufficient, which Phase 2 will answer with data).
+**Phase 2c — end-to-end reactivity (the "actually reacts to the game" gate).**
+Wire 2a telemetry through mixer/safety to the 2b bridge.
+*Test series:* drive the race car over the bump-course world on the Windows
+rig — curb strike must reach the rim < 150 ms after the physics event
+(FfbEventPacket path; measured by the recording HUD), bump texture must track
+block seams at speed, telemetry dropout (server lag simulation) must fade to
+zero and recover per §6.4; then the same flight-surface checks on a stock
+Simulated plane (torque tracks airspeed² and deflection). Every session
+recorded to the §10.5 CSV/report format for regression comparison.
+*Exit: recorded traces demonstrating each reactivity claim, committed
+alongside the report renders.*
+
+**Phase 3 — analog steering wheel block + feel.** §5.5 block (direct
+authority, float steering mixin bridge, server back-drive, telemetry attach
+point) with gametests (float angle end-to-end vs vanilla ±15 control test);
+buffet, ground rumble, detents, friction; `AeroModelSource` +
+`CraftStateSource` fallbacks; craft profiles; compat health check.
+*Exit: the §8 matrix demonstrated row by row; A/B session vanilla wheel vs
+sim wheel on the race car showing the quantization fix in the trace.*
+
+**Phase 4 — public release & ecosystem.** `api/` freeze at 1.0 (incl.
+`FloatSteeringSource`), docs site/README rewrite, community profile format,
+CurseForge/Modrinth packaging, SDL3 sidecar variant for non-MOZA wheels,
+upstream conversations (analog throttle block in Simulated; float-steering
+hook in Offroad so the mixin can retire).
 
 ---
 

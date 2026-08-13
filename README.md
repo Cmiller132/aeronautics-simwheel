@@ -44,9 +44,11 @@ See [`docs/DESIGN.md` §11](docs/DESIGN.md) for the full phase plan with exit cr
 
 1. **Phase 0 — feel scouting (no code).** Fly with [Create: Tweaked Controllers](https://github.com/getItemFromBlock/Create-Tweaked-Controllers) to learn what feels wrong.
 2. **Phase 1 — input (GLFW, client-only).** Analog steering + throttle via the mod's own packets; binding/calibration UI; works on servers without the addon.
-3. **Phase 2 — FFB core.** `SDL_haptic` port, dedicated FFB thread + safety chain, server-side rig resolution reading the **actual hinge constraint reaction torque** from Sable's solver (`getJointImpulses` on the swivel bearing's `RotaryConstraintHandle`), telemetry, sync-spring + damper feel.
-4. **Phase 3 — feel & degraded modes.** Buffet, ground rumble, detents; aero-model + craft-state fallback sources; client-estimated FFB on vanilla servers; craft profiles.
-5. **Phase 4 — public release.** API freeze, docs, packaging, upstream contributions (analog throttle block, libsdl4j haptics PR).
+3. **Phase 2a — telemetry framework.** Server addon: 20 Hz telemetry with both first torque sources — `WheelMountSource` (ground vehicles, the game's own tire math) and `ServoTorqueSource` (control surfaces, PD reconstruction). Headless-testable on the race car.
+4. **Phase 2b — MOZA bridge.** Native Windows sidecar on the official [MOZA SDK](https://mozaracing.com/pages/sdk) speaking a tiny localhost-UDP torque/state protocol (backend-agnostic — an SDL3 sidecar for other wheels comes later). Hardware-in-the-loop safety checklist on the R9.
+5. **Phase 2c — end-to-end reactivity.** Telemetry → mixer → safety chain → bridge → rim: curb strike < 150 ms to the wheel, bump texture, dropout fade, recorded traces.
+6. **Phase 3 — analog steering wheel block + feel.** Our `sim_steering_wheel` variant (direct angle authority, float steering to wheel mounts, server back-drive) plus buffet/rumble/detents and degraded modes.
+7. **Phase 4 — public release.** API freeze, docs, packaging, SDL3 sidecar variant, upstream contributions (analog throttle, float-steering hook in Offroad).
 
 ## Safety (direct-drive wheels can hurt you)
 
