@@ -203,6 +203,60 @@ Shared injection details (both modes):
 - **Detents**: `DETENT_MODIFIER` snaps the *commanded* angle to 45° steps client-side (vanilla Shift parity); optional FFB detent bumps at those angles (§6.5).
 - **Hygiene**: never send NaN/Inf (vanilla has NaN paths we refuse to enter); clamp to ±limit before send; on disengage always send the stop packet, including from a shutdown hook.
 
+### 5.3b The link-controlled fleet — the Virtual Linked Controller (study 2026-08-13)
+
+A field study of real community crafts (user's race car, example car, example
+plane — all in `testdata/`) showed the steering-wheel path of §5.3 covers a
+minority of vehicles. The dominant control pattern is **redstone-link
+vehicles**: `create:redstone_link` receivers feeding `directional_gearshift`s,
+clutches, and gearshifts, driven digitally by either Simulated's
+`linked_typewriter` (GLFW key → frequency pair, binary 15/0, one user,
+range-gated, bindings stored on the BE and readable) or Create's lectern +
+linked controller (6 movement-key channels, binary 15/0, 30-tick timeout,
+5-tick keepalive). Even the "best plane" steers with bang-bang gearshifts on
+torsion-sprung bearings.
+
+Source-verified facts that shape the design (Create `content/redstone/link/*`,
+Simulated `linked_typewriter/*`, Tweaked Controllers as prior art):
+
+1. **The link medium is analog end-to-end** — receivers output the
+   transmitted 0–15 verbatim; only the *controllers* are binary. Networks
+   combine transmitters by **max**.
+2. **Programmatic transmission is possible**: `IRedstoneLinkable` is public,
+   `Frequency.of(ItemStack)` is public, and
+   `Create.REDSTONE_LINK_NETWORK_HANDLER.addToNetwork/updateNetworkOf` is the
+   exact seam. Create: Tweaked Controllers ships this pattern in production
+   (25 channels, analog axis entries with strength = level, `updateNetworkOf`
+   per tick, 30-tick timeout) — but it is **1.20.1 Forge only**; nothing like
+   it exists on 1.21.1 NeoForge. Gotcha it teaches: rapid analog updates trip
+   Create's kinetic "flicker score" protection; it mixins `getFlickerScore()`
+   to 0. We either mirror that (scoped, config-gated) or rate-limit updates.
+3. **Typewriter bindings are readable** from `LinkedTypewriterBlockEntity`
+   (key → frequency-pair map), so a wheel can auto-bind to an existing car
+   with zero configuration.
+
+**The Virtual Linked Controller**, layered by what's installed:
+
+- **Tier 0 — vanilla servers (digital, works today):** engage on a
+  typewriter/lectern like a player would; the mod speaks the controller's own
+  packets (`TypewriterKeyInteractionPacket` press/release; Create's
+  `LinkedControllerInputPacket` with lecternPos) mapping wheel/pedal axes
+  through thresholds with hysteresis. Steering stays bang-bang because the
+  craft was built bang-bang — but hands go on a real wheel, and FFB runs in
+  chassis-synthesized mode (§6.7).
+- **Tier 1 — our server addon (analog on the same wires):** a per-player
+  server-side transmitter set (our own `IRedstoneLinkable`s, modeled on
+  Tweaked's axis entries) fed by a float C2S packet, transmitting analog 0–15
+  on the frequencies the craft already uses (auto-bound from the typewriter,
+  or bound via item UI). Wheel mounts steered through link receivers then get
+  their full ±15-step resolution proportionally — with existing blocks only.
+  Max-combining means a physically pressed key (15) dominates our analog
+  level while held; that is acceptable (the engaged driver isn't typing) and
+  cross-player interference is inherent to link frequencies.
+- **Tier 2 — float precision:** the §5.5 custom block path, unchanged; the
+  16-levels-per-direction cap is the medium's limit, not fixable by any
+  controller.
+
 ### 5.4 Throttle injection
 
 - Pedal (or wheel-mounted paddle/axis) → 0–15 int → `ThrottleLeverSignalPacket` [S2]. Target throttle lever selected the same way as the wheel (look + bind key), remembered per craft profile.
@@ -374,6 +428,7 @@ The rig resolver never special-cases craft types — it discovers whatever the s
 | Airship / blimp | Large rudder(s) on bearings | Joint ground truth, low q | Heavy, slow, inertia-dominated — honest for a multi-ton rudder; the spring floor keeps the wheel from feeling dead at 5 m/s. |
 | Ground vehicle (Create: Offroad) — **verified Aug 2026** | Wheel mounts: raycast spring/damper suspension + traction impulses applied directly to the craft body; steering = analog redstone on the mount's side faces (±15 steps → ±30° lock) rotating the traction basis. No constraints, no tire colliders. | `WheelMountSource` synthesis (§6.2.4) using the game's own tire formula | SAT-like resistance from the lateral slip-velocity term, per-block material grip (ice 0.0 / mud 0.25 / default 1.0 — data-driven), bump texture from suspension extension deltas, strikes from craft-body accel spikes. Not solver-true (nothing to read), but built from the exact numbers the game drives with. Note: the steering wheel block already feeds mounts via its analog redstone output — but quantized to 15 steps per side upstream, which our float packet cannot fix (§12). |
 | Boat (Deep Seas addon) | Rudder — hinge mechanism unverified | Joint truth if bearing-hinged, else synthesis | Verify when targeting boats (§12). |
+| **Link-controlled craft (typewriter/lectern — the community-dominant pattern, §5.3b)** | Redstone links → directional gearshifts/clutches; skid-steer or bang-bang surfaces; no rack, no servo target to read | `ChassisFeedbackSource`: yaw-rate resistance + lateral-G lean + suspension bump/strike events from craft-body state (all readable) | The wheel loads up against rotation and kicks on bumps even though no steering linkage exists — labeled honestly in the HUD as chassis feedback, gain config-gated. The example plane adds a better path: torsion-sprung surfaces expose spring deflection × rate = a *physically true* hinge moment (`TorsionSpringSource`, verify readability — §12). |
 | Thrust-vector / exotic craft | No bearings resolve | Cue-only | Spring, damper, rumble from craft state; the HUD badge says so honestly. |
 
 Two consequences worth calling out:
