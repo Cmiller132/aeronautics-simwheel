@@ -5,7 +5,7 @@ issueTrackerURL = "https://github.com/Cmiller132/aeronautics-simwheel/issues"
 
 [[mods]]
 modId = "aeronautics_simwheel"
-version = "0.1.0"
+version = "0.2.0"
 displayName = "Aeronautics SimWheel"
 description = '''Sim racing wheel input and true force feedback for Create: Simulated / Aeronautics. Targets the MOZA R9 and any DirectInput/PID FFB wheel.'''
 authors = "Cmiller132"

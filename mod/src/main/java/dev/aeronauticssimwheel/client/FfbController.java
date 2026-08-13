@@ -1,20 +1,26 @@
 package dev.aeronauticssimwheel.client;
 
 import dev.aeronauticssimwheel.AeronauticsSimwheel;
+import dev.aeronauticssimwheel.ffb.FeelEffects;
 import dev.aeronauticssimwheel.ffb.SafetyChain;
-import dev.aeronauticssimwheel.ffb.SyncSpring;
-import dev.aeronauticssimwheel.ffb.VirtualWheelPredictor;
+import dev.aeronauticssimwheel.ffb.SoftLock;
 import dev.aeronauticssimwheel.hal.Capability;
 import dev.aeronauticssimwheel.hal.WheelDevice;
 import net.minecraft.client.Minecraft;
 
 /**
- * MVP force-feedback loop: vanilla-compat client-only mode (DESIGN.md §6.5
- * degraded path). No server telemetry yet — the virtual wheel is dead-reckoned
- * from what we commanded (16 RPM slew) and corrected by the BE's synced angle,
- * and the only feel source is the sync-spring + damper. Runs on its own 250 Hz
- * daemon thread through the full SafetyChain, exactly like the final
- * architecture; the game thread just publishes an input snapshot each tick.
+ * Client-local FFB loop for the direct-authority Sim Steering Wheel.
+ *
+ * <p>With direct angle authority there is no slew lag to render, so the old
+ * sync-spring/predictor pair is gone. What remains local (DESIGN.md §6.5) is
+ * what a standard sim rig renders without telemetry: the <b>soft lock</b> at
+ * the block's configured steering range, a baseline <b>damper</b> and
+ * <b>friction</b> so the wheel never feels dead. Tire-force telemetry
+ * (WheelMountSource) lands in Phase 2a and adds into the same mix.
+ *
+ * <p>Runs on its own 250 Hz daemon thread through the full SafetyChain,
+ * exactly like the final architecture; the game thread just publishes an
+ * input snapshot each tick.
  */
 public final class FfbController {
 
@@ -23,14 +29,18 @@ public final class FfbController {
     private static final double LOOP_HZ = 250.0;
     private static final long SNAPSHOT_FRESH_NANOS = 150_000_000L;
 
+    /** Baseline feel constants (config UI later). */
+    private static final float DAMPER_NM_PER_DEG_PER_S = 0.0015f;
+    private static final float FRICTION_NM = 0.12f;
+    private static final double FRICTION_EPS_DEG_PER_S = 5.0;
+
     private record Snapshot(boolean engaged, float hwDeg, float hwVelDegPerS,
-                            double virtualDeg, long nanos) {
-        static final Snapshot IDLE = new Snapshot(false, 0f, 0f, 0.0, 0L);
+                            float lockDeg, long nanos) {
+        static final Snapshot IDLE = new Snapshot(false, 0f, 0f, 450f, 0L);
     }
 
     private final SafetyChain safety = new SafetyChain(SafetyChain.Config.defaults());
-    private final SyncSpring spring = new SyncSpring(SyncSpring.Config.defaults());
-    private final VirtualWheelPredictor predictor = new VirtualWheelPredictor();
+    private final SoftLock softLock = new SoftLock(SoftLock.Config.defaults());
 
     private volatile Snapshot snapshot = Snapshot.IDLE;
     private volatile WheelDevice device;
@@ -55,7 +65,7 @@ public final class FfbController {
     }
 
     /** Game thread, once per client tick: publish inputs for the FFB thread. */
-    public void updateFromGame(Minecraft mc, WheelInput input, SimControlLink link) {
+    public void updateFromGame(Minecraft mc, WheelInput input, SimWheelLink link) {
         boolean engaged = link.isEngaged() && input.hasInput();
 
         if (engaged != wasEngaged) {
@@ -85,18 +95,11 @@ public final class FfbController {
         }
 
         double dt = 1 / 20.0;
-        predictor.setCommandedTarget(link.commandedDeg());
-        predictor.step(dt);
-        float measured = link.measuredDeg(mc);
-        if (!Float.isNaN(measured)) {
-            predictor.onMeasurement(measured);
-        }
-
-        float hwDeg = link.commandedDeg(); // hardware position in wheel-space == the command
+        float hwDeg = link.commandedDeg(mc); // direct authority: command == position
         float hwVel = (float) ((hwDeg - prevHwDeg) / dt);
         prevHwDeg = hwDeg;
 
-        snapshot = new Snapshot(true, hwDeg, hwVel, predictor.angleDeg(), System.nanoTime());
+        snapshot = new Snapshot(true, hwDeg, hwVel, link.lockDeg(mc), System.nanoTime());
     }
 
     private void loop() {
@@ -109,10 +112,12 @@ public final class FfbController {
 
             Snapshot s = snapshot;
             boolean fresh = s.engaged() && (now - s.nanos()) < SNAPSHOT_FRESH_NANOS;
-            // Ground-vehicle MVP: zero dynamic pressure → sync-spring at k_min.
-            float requested = s.engaged()
-                    ? spring.torqueNm(s.hwDeg(), s.hwVelDegPerS(), s.virtualDeg(), 0.0)
-                    : 0f;
+            float requested = 0f;
+            if (s.engaged()) {
+                requested = softLock.torqueNm(s.hwDeg(), s.hwVelDegPerS(), s.lockDeg())
+                        + FeelEffects.damper(DAMPER_NM_PER_DEG_PER_S, 1.0, 1.0, s.hwVelDegPerS())
+                        + FeelEffects.friction(FRICTION_NM, FRICTION_EPS_DEG_PER_S, s.hwVelDegPerS());
+            }
             float out = safety.step(requested, dt, fresh);
             lastOutputNm = out;
 
@@ -146,9 +151,5 @@ public final class FfbController {
 
     public SafetyChain.State safetyState() {
         return safety.state();
-    }
-
-    public double virtualWheelDeg() {
-        return predictor.angleDeg();
     }
 }

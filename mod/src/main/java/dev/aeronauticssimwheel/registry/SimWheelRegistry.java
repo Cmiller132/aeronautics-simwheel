@@ -1,8 +1,8 @@
 package dev.aeronauticssimwheel.registry;
 
 import dev.aeronauticssimwheel.AeronauticsSimwheel;
-import dev.aeronauticssimwheel.content.SimControlBlock;
-import dev.aeronauticssimwheel.content.SimControlBlockEntity;
+import dev.aeronauticssimwheel.content.SimSteeringWheelBlock;
+import dev.aeronauticssimwheel.content.SimSteeringWheelBlockEntity;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.Item;
@@ -16,7 +16,7 @@ import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
 
-/** First-party content registration. */
+/** First-party content registration: the Sim Steering Wheel, the only control surface. */
 public final class SimWheelRegistry {
 
     private static final DeferredRegister.Blocks BLOCKS =
@@ -26,19 +26,20 @@ public final class SimWheelRegistry {
     private static final DeferredRegister<BlockEntityType<?>> BLOCK_ENTITIES =
             DeferredRegister.create(Registries.BLOCK_ENTITY_TYPE, AeronauticsSimwheel.MOD_ID);
 
-    public static final DeferredBlock<SimControlBlock> SIM_CONTROL =
-            BLOCKS.register("sim_control", () -> new SimControlBlock(
+    public static final DeferredBlock<SimSteeringWheelBlock> SIM_STEERING_WHEEL =
+            BLOCKS.register("sim_steering_wheel", () -> new SimSteeringWheelBlock(
                     BlockBehaviour.Properties.of()
                             .mapColor(MapColor.COLOR_ORANGE)
                             .strength(1.5f)
                             .sound(SoundType.WOOD)));
 
-    public static final DeferredItem<BlockItem> SIM_CONTROL_ITEM =
-            ITEMS.register("sim_control", () -> new BlockItem(SIM_CONTROL.get(), new Item.Properties()));
+    public static final DeferredItem<BlockItem> SIM_STEERING_WHEEL_ITEM =
+            ITEMS.register("sim_steering_wheel",
+                    () -> new BlockItem(SIM_STEERING_WHEEL.get(), new Item.Properties()));
 
-    public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<SimControlBlockEntity>> SIM_CONTROL_BE =
-            BLOCK_ENTITIES.register("sim_control", () -> BlockEntityType.Builder
-                    .of(SimControlBlockEntity::new, SIM_CONTROL.get())
+    public static final DeferredHolder<BlockEntityType<?>, BlockEntityType<SimSteeringWheelBlockEntity>> SIM_STEERING_WHEEL_BE =
+            BLOCK_ENTITIES.register("sim_steering_wheel", () -> BlockEntityType.Builder
+                    .of(SimSteeringWheelBlockEntity::new, SIM_STEERING_WHEEL.get())
                     .build(null));
 
     private SimWheelRegistry() {

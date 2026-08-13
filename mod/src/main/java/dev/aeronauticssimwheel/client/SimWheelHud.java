@@ -6,17 +6,18 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.LayeredDraw;
 
 /**
- * Minimal debug HUD (MVP stand-in for the DESIGN.md §8 status widget): device,
- * engagement, commanded vs. virtual wheel angle, and safety-chain output.
- * Drawn only while an input device is active or a wheel is latched.
+ * Minimal debug HUD (stand-in for the DESIGN.md §8 status widget): device,
+ * engagement, commanded vs. server wheel angle within the configured lock,
+ * and safety-chain output. Drawn only while an input device is active or a
+ * wheel is latched.
  */
 public final class SimWheelHud implements LayeredDraw.Layer {
 
     private final WheelInput input;
-    private final SimControlLink link;
+    private final SimWheelLink link;
     private final FfbController ffb;
 
-    public SimWheelHud(WheelInput input, SimControlLink link, FfbController ffb) {
+    public SimWheelHud(WheelInput input, SimWheelLink link, FfbController ffb) {
         this.input = input;
         this.link = link;
         this.ffb = ffb;
@@ -35,14 +36,16 @@ public final class SimWheelHud implements LayeredDraw.Layer {
         if (link.isEngaged()) {
             g.drawString(mc.font, "engaged @ " + link.latchedPos().toShortString(), 4, y, 0xFF80FF80);
             y += 10;
-            float measured = link.measuredDeg(mc);
-            g.drawString(mc.font, String.format("cmd %+.1f°  virt %+.1f°  game %+.1f°",
-                    link.commandedDeg(), ffb.virtualWheelDeg(), measured), 4, y, 0xFFFFFFFF);
+            float game = link.serverAngleDeg(mc);
+            g.drawString(mc.font, String.format("cmd %+.1f°  game %+.1f°  lock ±%.0f°",
+                    link.commandedDeg(mc), Float.isNaN(game) ? 0f : game, link.lockDeg(mc)),
+                    4, y, 0xFFFFFFFF);
             y += 10;
             g.drawString(mc.font, String.format("FFB %+.2f Nm [%s]",
                     ffb.lastOutputNm(), ffb.safetyState()), 4, y, 0xFFFFD080);
         } else {
-            g.drawString(mc.font, "J = engage on a steering wheel", 4, y, 0xFFA0A0A0);
+            g.drawString(mc.font, "sit in a seat, look at the Sim Steering Wheel, J = engage",
+                    4, y, 0xFFA0A0A0);
         }
     }
 }

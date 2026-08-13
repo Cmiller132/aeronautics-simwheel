@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "aeronautics_simwheel:block/sim_steering_wheel" },
+    "facing=south": { "model": "aeronautics_simwheel:block/sim_steering_wheel", "y": 180 },
+    "facing=west": { "model": "aeronautics_simwheel:block/sim_steering_wheel", "y": 270 },
+    "facing=east": { "model": "aeronautics_simwheel:block/sim_steering_wheel", "y": 90 }
+  }
+}

@@ -23,7 +23,7 @@ public final class SimWheelClient {
             InputConstants.KEY_K, "key.categories.aeronautics_simwheel");
 
     private static WheelInput input;
-    private static SimControlLink link;
+    private static SimWheelLink link;
     private static FfbController ffb;
 
     /** -Dsimwheel.selftest=N: log input/FFB state and quit after N client ticks. */
@@ -35,7 +35,7 @@ public final class SimWheelClient {
 
     public static void init(IEventBus modBus) {
         input = new WheelInput();
-        link = new SimControlLink();
+        link = new SimWheelLink();
         ffb = new FfbController();
 
         modBus.addListener((RegisterKeyMappingsEvent e) -> {

@@ -6,7 +6,7 @@
    on top of the rotation_speed_controller and feeds both directional_gearshifts,
    so it must stay a real large cogwheel (DnDecor cogs are functional reskins);
    swapping lets the test env drop the DnDecor dependency.
-2. control_rig.nbt — 5x5x5 rig: smooth stone floor, our sim_control block and
+2. control_rig.nbt — 5x5x5 rig: smooth stone floor, our sim_steering_wheel and
    a create:redstone_link receiver (red wool pair) for the analog-transmission
    gametest.
 
@@ -37,7 +37,7 @@ data_version = car['DataVersion']
 # (mirrors the state/NBT of a receiver link from the user's example car).
 control_palette = nbtlib.List[tag.Compound]([
     tag.Compound({'Name': tag.String('minecraft:smooth_stone')}),
-    tag.Compound({'Name': tag.String('aeronautics_simwheel:sim_control'),
+    tag.Compound({'Name': tag.String('aeronautics_simwheel:sim_steering_wheel'),
                   'Properties': tag.Compound({'facing': tag.String('north')})}),
     # facing=up → floor-mounted (FACING points away from the supporting block);
     # facing=down would hang from the block above and pop off in this rig.

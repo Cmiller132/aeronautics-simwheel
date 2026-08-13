@@ -2,5 +2,5 @@
   "key.categories.aeronautics_simwheel": "Aeronautics SimWheel",
   "key.aeronautics_simwheel.engage": "Engage/Disengage Sim Wheel",
   "key.aeronautics_simwheel.demo": "Toggle Demo Input (sine sweep)",
-  "block.aeronautics_simwheel.sim_control": "Sim Control"
+  "block.aeronautics_simwheel.sim_steering_wheel": "Sim Steering Wheel"
 }

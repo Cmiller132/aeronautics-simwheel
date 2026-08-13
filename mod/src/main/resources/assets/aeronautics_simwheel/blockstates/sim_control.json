@@ -1,8 +1,0 @@
-{
-  "variants": {
-    "facing=north": { "model": "aeronautics_simwheel:block/sim_control" },
-    "facing=south": { "model": "aeronautics_simwheel:block/sim_control", "y": 180 },
-    "facing=west": { "model": "aeronautics_simwheel:block/sim_control", "y": 270 },
-    "facing=east": { "model": "aeronautics_simwheel:block/sim_control", "y": 90 }
-  }
-}

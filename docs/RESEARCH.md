@@ -92,7 +92,35 @@ Each physics step, compute one signed steering-column torque; stream it as a sin
 
 A 9 Nm direct-drive base can injure wrists. Clamp + slew-rate-limit all output; no instantaneous sign flips at gain; start at zero gain and ramp in; document the Pit House setup.
 
-## 3. Open items to verify on hardware
+## 3. Ground vehicles: wheel-mount control & physics (source-verified Aug 2026)
+
+Read directly from `offroad/.../wheel_mount/WheelMountBlockEntity.java` (Simulated-Project repo, v1.3.x). These are the formulas the Sim Steering Wheel drives and the FFB reads — the ground-vehicle ground truth.
+
+### Drive (throttle is the kinetic network, not a lever)
+
+- The mount is a `KineticBlockEntity`. Propulsion per physics substep: `kineticSpeed × (1 − brake) × min(friction, 1) × 1.75 × timeStep` along the wheel's rolling direction (`kineticSpeed` sign depends on the facing axis). Cars accelerate by controlling shaft RPM/direction (engines, gearshifts); there is no throttle block in the ground path.
+
+### Brake (native, analog, per wheel — nothing to add)
+
+- **Input: analog redstone into the block directly above the mount**, read as `getSignal(pos.above(), UP) / 15`. 0–15 per wheel.
+- Braking force: velocity-proportional drag along the rolling direction with coefficient `(0.075 + brake × 0.3) × min(friction, 1)`, scaled by suspension load (`strengthMul`). The 0.075 baseline is always-on rolling resistance; full brake ≈ 5× drag.
+- Full brake also multiplies the drive term by `(1 − brake)` → the brake doubles as a clutch/kill.
+- Client visual: wheel spin rate scaled by `(15 − brakeSignal)/15` — wheels visibly stop under braking.
+- **No lockup**: it is a linear drag, not a grip-clamped friction torque. Wheels cannot lock, there is no slip under braking, and lateral grip is unaffected (no combined-slip model). FFB must not fake a lockup cue.
+
+### Steering (side faces, signed by subtraction)
+
+- The mount reads redstone on both side faces relative to its facing: `signal = signalLeft − signalRight` (signed −15…+15), where left/right are `facing.getClockWise()/getCounterClockWise()`.
+- Yaw = `−signal/15 × 30°` (±15 steps → ±30° lock), smoothed by a 0.4-per-tick lerp (`chasingYaw`) — a built-in ~2–3 tick relaxation that behaves like tire relaxation.
+- The stock steering wheel emits this via Simulated's `IDirectionalAnalogOutput` (clockwise face = positive 0–15, counterclockwise = negative, facing face = held 15/0), with the sign flipped for east/south facings so physical left/right stays consistent; bridged to plain redstone by a comparator mixin. Our block emits the same convention directly as vanilla weak power.
+
+### Tire lateral force (the FFB torque source)
+
+- Per substep: `v_side × 0.6 × touchingFriction × strengthMul` opposing the contact patch's sideways velocity — this is what turns the car, and reflected through the steering geometry it is the self-aligning torque for the wheel rim.
+- `touchingFriction` is per-contacted-block (`sable:friction` datapack multipliers: ice 0.0 → fudged to 0.1, mud 0.25, default 1.0), floored by the tire item's `minimumFriction`.
+- Suspension: raycast spring (`strength × normalMassScaling × 40`) + damper (`× 1`), strength scroll-valued 5–180; extension deltas are the bump/strike texture source.
+
+## 4. Open items to verify on hardware
 
 - SDL3 haptics against a real R9 on Windows (expected fine — strictly PID-compliant — but unproven; no MOZA-specific SDL bug reports exist either way).
 - Behavior of high-rate `SDL_UpdateHapticEffect` on the R9 (SDL issue #12511).
