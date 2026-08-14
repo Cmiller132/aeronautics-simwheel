@@ -608,6 +608,7 @@ impl EvdevDevice {
                     self.params_valid = true;
                     self.needs_start = false;
                     self.effect_started_at = None;
+                    self.last_play_attempt = None;
                     // Belt and braces: also stop playback of the (now zero)
                     // effect in case a previous nonzero level is still live.
                     let _ = write_event(fd, EV_FF, id as u16, 0);
@@ -960,6 +961,7 @@ impl FfbDevice for EvdevDevice {
                             self.params_valid = true;
                             self.needs_start = false;
                             self.effect_started_at = None;
+                            self.last_play_attempt = None;
                         }
                         // else: quarantined — ensure_effect_running retries
                         // the forced zero every poll, and the finite lease

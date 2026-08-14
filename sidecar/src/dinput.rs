@@ -418,6 +418,7 @@ impl DirectInputDevice {
                     self.params_valid = true;
                     self.needs_start = false;
                     self.effect_started_at = None;
+                    self.last_play_attempt = None;
                     let _ = self.effect.Stop();
                     self.output_fault = false;
                 }
@@ -645,6 +646,7 @@ impl FfbDevice for DirectInputDevice {
                         if stopped || all_stopped {
                             self.last_magnitude = 0;
                             self.params_valid = true;
+                            self.last_play_attempt = None;
                             // The device still stores the STALE parameters —
                             // never replay them: the effect stays unplayed at
                             // zero, and any nonzero must rewrite them first.

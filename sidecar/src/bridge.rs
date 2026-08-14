@@ -28,13 +28,11 @@ pub const CLIENT_SILENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Max datagrams processed per tick — a loopback flood must never starve
 /// `run_safety` (adversarial finding: unbounded drain before the watchdog).
 pub const MAX_FRAMES_PER_TICK: u32 = 64;
-/// After a disarm, START frames are ignored this long — anything arriving
-/// within it was in flight before the connection changed and cannot be the
-/// deliberate re-engage. Imperceptible to an operator pressing a key.
-pub const REARM_BLOCK: Duration = Duration::from_millis(50);
-/// Upper bound on datagrams discarded by one flush — the socket buffer is
-/// finite, and an unbounded loop here would be a starvation hazard.
-const MAX_FLUSH_FRAMES: u32 = 4096;
+/// Upper bound on receive ATTEMPTS in one flush — the socket buffer is
+/// finite, and an unbounded loop here would be a starvation hazard. Counts
+/// every iteration, including errors, so a storm of ICMP-driven
+/// `ConnectionReset`s cannot spin past the bound.
+const MAX_FLUSH_ATTEMPTS: u32 = 4096;
 
 pub struct Bridge<D: FfbDevice> {
     socket: UdpSocket,
@@ -46,10 +44,6 @@ pub struct Bridge<D: FfbDevice> {
     invert: bool,
     /// Device connection epoch at the last tick; any change disarms.
     last_device_epoch: u32,
-    /// After a disarm, ignore START frames briefly: anything arriving in
-    /// this window was already in flight when the connection changed, so it
-    /// cannot be the deliberate re-engage the disarm demands.
-    rearm_not_before: Option<Instant>,
 
     client: Option<SocketAddr>,
     last_client_frame: Instant,
@@ -89,7 +83,6 @@ impl<D: FfbDevice> Bridge<D> {
             verbose,
             invert: false,
             last_device_epoch,
-            rearm_not_before: None,
             client: None,
             last_client_frame: Instant::now(),
             last_rx_seq: None,
@@ -129,10 +122,14 @@ impl<D: FfbDevice> Bridge<D> {
             // Frames that arrived while the connection was changing are
             // still queued in the socket: discard them, or the very next
             // drain would re-arm the session with a START the operator sent
-            // before the wheel came back (review-caught). The short rearm
-            // block covers the datagrams already in flight past the flush.
+            // before the wheel came back (review-caught). This flush IS the
+            // guarantee — everything read afterwards demonstrably arrived
+            // after the change. A wall-clock grace period was tried and
+            // removed: it is measured when frames are PROCESSED, not when
+            // they arrive, so a delayed tick defeats it, and it can drop a
+            // genuine re-engage (which the client, streaming torque, would
+            // not repeat).
             let dropped = self.flush_socket();
-            self.rearm_not_before = Some(now + REARM_BLOCK);
             if self.started {
                 self.started = false;
                 eprintln!(
@@ -209,9 +206,12 @@ impl<D: FfbDevice> Bridge<D> {
     fn flush_socket(&mut self) -> u32 {
         let mut buf = [0u8; protocol::MAX_FRAME_BYTES];
         let mut dropped = 0;
-        while dropped < MAX_FLUSH_FRAMES {
+        for _ in 0..MAX_FLUSH_ATTEMPTS {
             match self.socket.recv_from(&mut buf) {
                 Ok(_) => dropped += 1,
+                // Windows surfaces a previous send's ICMP port-unreachable
+                // here; it says nothing about the queue, so keep draining
+                // (bounded by the attempt count, not by successes).
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
                 Err(_) => break,
             }
@@ -259,13 +259,6 @@ impl<D: FfbDevice> Bridge<D> {
 
         match frame {
             Frame::Start { .. } => {
-                if self.rearm_not_before.is_some_and(|t| now < t) {
-                    // In flight when the connection changed — not a
-                    // deliberate re-engage. Drop it; the operator's next
-                    // engage arms normally.
-                    return;
-                }
-                self.rearm_not_before = None;
                 self.panic_latched = false;
                 self.started = true;
                 self.zero_torque("start");
@@ -640,10 +633,7 @@ mod tests {
             "torque must stay off until a deliberate re-START"
         );
 
-        // A fresh START (the deliberate re-engage) restores the session —
-        // once the post-disarm rearm block has passed, since a START inside
-        // it is treated as pre-change in-flight traffic.
-        std::thread::sleep(REARM_BLOCK);
+        // A fresh START (the deliberate re-engage) restores the session.
         send(&client, addr, Frame::Start { sequence: 4 });
         std::thread::sleep(Duration::from_millis(20));
         bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
@@ -719,8 +709,8 @@ mod tests {
         bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
         assert_eq!(bridge.device_mut().inner.last_torque_nm(), 0.0);
 
-        // A genuinely fresh START, after the rearm block, re-engages.
-        std::thread::sleep(REARM_BLOCK);
+        // A START sent AFTER the change (so, read after the flush) is a
+        // genuine re-engage and re-arms.
         send(&client, addr, Frame::Start { sequence: 5 });
         std::thread::sleep(Duration::from_millis(20));
         bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
