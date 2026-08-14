@@ -21,3 +21,6 @@ runs/
 # OS
 .DS_Store
 dist/
+
+# Agent sandbox Gradle home (Codex sessions redirect GRADLE_USER_HOME here)
+.gradle-sandbox-home/

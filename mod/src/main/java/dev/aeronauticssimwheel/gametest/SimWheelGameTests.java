@@ -6,10 +6,14 @@ import dev.aeronauticssimwheel.content.GroundTelemetrySampler;
 import dev.aeronauticssimwheel.content.SimChannel;
 import dev.aeronauticssimwheel.content.SimSteeringWheelBlockEntity;
 import dev.ryanhcode.sable.api.block.BlockEntitySubLevelActor;
+import dev.ryanhcode.sable.api.physics.constraint.ConstraintJointAxis;
+import dev.ryanhcode.sable.api.physics.constraint.GenericConstraintConfiguration;
+import dev.ryanhcode.sable.api.physics.constraint.PhysicsConstraintHandle;
 import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
 import dev.ryanhcode.sable.api.sublevel.ServerSubLevelContainer;
 import dev.ryanhcode.sable.mixinterface.plot.SubLevelContainerHolder;
 import dev.ryanhcode.sable.sublevel.ServerSubLevel;
+import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import dev.simulated_team.simulated.content.blocks.physics_assembler.PhysicsAssemblerBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -22,6 +26,7 @@ import net.neoforged.neoforge.gametest.GameTestHolder;
 import net.neoforged.neoforge.gametest.PrefixGameTestTemplate;
 import org.joml.Vector3d;
 
+import java.util.EnumSet;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -224,6 +229,8 @@ public class SimWheelGameTests {
         UUID driver = UUID.randomUUID();
         AtomicReference<SimSteeringWheelBlockEntity> wheelRef = new AtomicReference<>();
         AtomicReference<ServerSubLevel> subLevelRef = new AtomicReference<>();
+        AtomicReference<Vector3d> rigPositionRef = new AtomicReference<>();
+        AtomicReference<PhysicsConstraintHandle> rigConstraintRef = new AtomicReference<>();
         AtomicReference<Float> maxAbsNm = new AtomicReference<>(0f);
         AtomicLong samplesAtSilence = new AtomicLong(-1);
 
@@ -278,11 +285,66 @@ public class SimWheelGameTests {
                 }
             });
         }
-        // Two shoves + a yaw spin so the tires develop genuine side-slip.
-        helper.runAtTickTime(20, () -> RigidBodyHandle.of(subLevelRef.get())
-                .addLinearAndAngularVelocity(new Vector3d(3, 0, 1), new Vector3d(0, 0.6, 0)));
-        helper.runAtTickTime(35, () -> RigidBodyHandle.of(subLevelRef.get())
-                .addLinearAndAngularVelocity(new Vector3d(-2, 0, -1), new Vector3d(0, -0.5, 0)));
+        // Hold the craft as an upright kinematic test rig throughout the
+        // measurement window. Without this, the raw assembly can acquire a
+        // small random tip after the initial shove and leave three mounts
+        // airborne. Contact and tire forces still come from Offroad's own
+        // raycasts and tire model; this only fixes the rig pose and slip input.
+        // Pinning the first position also prevents the imposed velocity from
+        // carrying the craft off the small GameTest ground pad.
+        for (int tick = 20; tick <= 75; tick++) {
+            helper.runAtTickTime(tick, () -> {
+                RigidBodyHandle body = RigidBodyHandle.of(subLevelRef.get());
+                // Seat every tire within suspension reach instead of inheriting
+                // the body's nondeterministic partial-fall height at tick 20.
+                rigPositionRef.compareAndSet(null,
+                        new Vector3d(subLevelRef.get().logicalPose().position()).add(0, -0.75, 0));
+                subLevelRef.get().logicalPose().position().set(rigPositionRef.get());
+                subLevelRef.get().logicalPose().orientation().identity();
+                body.teleport(new Vector3d(rigPositionRef.get()), new org.joml.Quaterniond());
+                body.addLinearAndAngularVelocity(
+                        new Vector3d(0, 0, 2).sub(body.getLinearVelocity()),
+                        new Vector3d(body.getAngularVelocity()).negate());
+            });
+        }
+
+        // A body-to-world angular-only joint enforces the same upright pose at
+        // physics-substep resolution. Linear axes stay free so Offroad still
+        // observes the imposed side-slip and computes the tire forces itself.
+        helper.runAtTickTime(20, () -> {
+            ServerSubLevel subLevel = subLevelRef.get();
+            Vector3d localAnchor = new Vector3d(
+                    wheelRef.get().getBlockPos().getX() + 0.5,
+                    wheelRef.get().getBlockPos().getY() + 0.5,
+                    wheelRef.get().getBlockPos().getZ() + 0.5);
+            Vector3d worldAnchor = subLevel.logicalPose()
+                    .transformPosition(localAnchor, new Vector3d());
+            PhysicsConstraintHandle constraint = SubLevelPhysicsSystem.require(helper.getLevel())
+                    .getPipeline().addConstraint(subLevel, null,
+                            new GenericConstraintConfiguration(
+                                    localAnchor, worldAnchor,
+                                    new org.joml.Quaterniond(), new org.joml.Quaterniond(),
+                                    EnumSet.of(ConstraintJointAxis.ANGULAR_X,
+                                            ConstraintJointAxis.ANGULAR_Y,
+                                            ConstraintJointAxis.ANGULAR_Z)));
+            helper.assertTrue(constraint != null && constraint.isValid(),
+                    "kinematic test rig angular constraint must be valid");
+            rigConstraintRef.set(constraint);
+        });
+
+        // Prove the discrete link path directly, independently of the torque
+        // model: both front mounts must actually chase a nonzero steering yaw.
+        helper.runAtTickTime(35, () -> {
+            int steeredMounts = 0;
+            for (BlockEntitySubLevelActor actor : subLevelRef.get().getPlot().getBlockEntityActors()) {
+                if (actor instanceof dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlockEntity mount
+                        && Math.abs(readChasingYaw(mount)) > 0.1) {
+                    steeredMounts++;
+                }
+            }
+            helper.assertTrue(steeredMounts == 2,
+                    "link steering must reach both front mounts, got " + steeredMounts);
+        });
 
         // Scan the flushed telemetry while driving.
         for (int tick = 25; tick <= 70; tick += 5) {
@@ -318,6 +380,7 @@ public class SimWheelGameTests {
                     "Ground telemetry trace: max |torque| {} Nm over {} samples — {}",
                     maxAbsNm.get(), total, wheelRef.get().telemetry().debugSummary());
         });
+        helper.runAtTickTime(76, () -> rigConstraintRef.get().remove());
 
         // Input silence: the 30-tick timeout must kill the rig with the latch.
         helper.runAtTickTime(115, () ->
