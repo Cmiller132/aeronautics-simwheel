@@ -78,6 +78,10 @@ gh release create v<ver> \
 (Requires the `gh` CLI authenticated against the repo. Any machine works —
 the artifacts are already built by step 3.)
 
+If `gh` is unavailable, create the release and upload the same assets through
+the GitHub REST API. Read the token at runtime from `git credential fill`; do
+not echo or store it. v0.2.0 and v0.3.0 were both published this way.
+
 ## 6. After publishing
 
 Smoke-test the tester path from a clean download: import the mrpack, place

@@ -62,10 +62,10 @@ zero-addon compat story.
 
 ## 2. The verified integration surface
 
-Every reach into upstream code, enumerated. Each row was read from source and
-each can break when Simulated updates, so each gets a startup health check
-(§10.4) — upstream churn becomes a loud log line and a degraded feature,
-never a crash.
+Every reach into upstream code, enumerated. Each row was read from source; the
+reaches that can drift silently on upstream updates get a startup health check
+(§10.4), turning otherwise silent churn into a loud log line and a degraded
+feature, never a crash.
 
 | # | Surface | Where (Simulated-Project v1.3.x) | What we use it for | Access | Risk |
 |---|---------|----------------------------------|--------------------|--------|------|
