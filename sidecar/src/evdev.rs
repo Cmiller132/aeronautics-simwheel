@@ -623,6 +623,7 @@ impl EvdevDevice {
                             self.params_valid = true;
                             self.needs_start = false;
                             self.effect_started_at = None;
+                            self.last_play_attempt = None;
                         }
                     }
                     if is_enodev(&e) {

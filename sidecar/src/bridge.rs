@@ -44,6 +44,11 @@ pub struct Bridge<D: FfbDevice> {
     invert: bool,
     /// Device connection epoch at the last tick; any change disarms.
     last_device_epoch: u32,
+    /// Set when a post-disarm flush could NOT confirm the socket was empty
+    /// (attempt budget or an unexpected error). Frames may still be queued
+    /// from before the connection change, so START is refused until a later
+    /// flush drains the queue to confirmed-empty.
+    rearm_blocked: bool,
 
     client: Option<SocketAddr>,
     last_client_frame: Instant,
@@ -83,6 +88,7 @@ impl<D: FfbDevice> Bridge<D> {
             verbose,
             invert: false,
             last_device_epoch,
+            rearm_blocked: false,
             client: None,
             last_client_frame: Instant::now(),
             last_rx_seq: None,
@@ -129,7 +135,8 @@ impl<D: FfbDevice> Bridge<D> {
             // they arrive, so a delayed tick defeats it, and it can drop a
             // genuine re-engage (which the client, streaming torque, would
             // not repeat).
-            let dropped = self.flush_socket();
+            let (dropped, confirmed_empty) = self.flush_socket();
+            self.rearm_blocked = !confirmed_empty;
             if self.started {
                 self.started = false;
                 eprintln!(
@@ -137,6 +144,16 @@ impl<D: FfbDevice> Bridge<D> {
                      ({dropped} queued frames dropped); re-engage in game to \
                      restore forces"
                 );
+            }
+        }
+
+        // A flush that could not prove the queue was empty leaves the door
+        // open to pre-change frames: keep flushing (and refusing START)
+        // until one does.
+        if self.rearm_blocked {
+            let (_, confirmed_empty) = self.flush_socket();
+            if confirmed_empty {
+                self.rearm_blocked = false;
             }
         }
 
@@ -203,20 +220,27 @@ impl<D: FfbDevice> Bridge<D> {
 
     /// Discard everything queued on the socket without interpreting it.
     /// Returns how many datagrams were dropped.
-    fn flush_socket(&mut self) -> u32 {
+    /// Returns (datagrams dropped, queue CONFIRMED empty). "Confirmed" means
+    /// the loop ended because a receive would have blocked — the only proof
+    /// that nothing from before the connection change is still waiting.
+    /// Exhausting the attempt budget or hitting an unexpected error is NOT
+    /// proof, and the caller must keep the session disarmed (review-caught:
+    /// otherwise normal draining resumes immediately over residual frames).
+    fn flush_socket(&mut self) -> (u32, bool) {
         let mut buf = [0u8; protocol::MAX_FRAME_BYTES];
         let mut dropped = 0;
         for _ in 0..MAX_FLUSH_ATTEMPTS {
             match self.socket.recv_from(&mut buf) {
                 Ok(_) => dropped += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return (dropped, true),
                 // Windows surfaces a previous send's ICMP port-unreachable
                 // here; it says nothing about the queue, so keep draining
                 // (bounded by the attempt count, not by successes).
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
-                Err(_) => break,
+                Err(_) => return (dropped, false),
             }
         }
-        dropped
+        (dropped, false)
     }
 
     /// Wrap-aware "is `seq` newer than the session's latest" (RFC 1982 style).
@@ -259,6 +283,12 @@ impl<D: FfbDevice> Bridge<D> {
 
         match frame {
             Frame::Start { .. } => {
+                if self.rearm_blocked {
+                    // Can't prove this START post-dates the connection
+                    // change — refuse rather than guess. An instant zero is
+                    // always safe; an unearned re-arm never is.
+                    return;
+                }
                 self.panic_latched = false;
                 self.started = true;
                 self.zero_torque("start");
