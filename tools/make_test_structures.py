@@ -13,6 +13,11 @@
 2. control_rig.nbt — 5x5x5 rig: smooth stone floor, our sim_steering_wheel and
    a create:redstone_link receiver (red wool pair) for the analog-transmission
    gametest.
+3. schematics/simwheel_race_car.nbt — the SHAREABLE test car: same race car,
+   sim wheel aboard and PRE-BOUND to the car's own link frequencies, the four
+   links above the wheel mounts flipped into BRAKE receivers (receiver above a
+   mount is Offroad's native per-wheel brake input), failsafe brake preset.
+   Testers drop it in their Create schematics folder and drive.
 
 Run from the repo root:  <venv>/bin/python tools/make_test_structures.py
 """
@@ -49,6 +54,77 @@ car['blocks'].append(tag.Compound({
 car.save(f'{OUT}/race_car.nbt', gzipped=True)
 
 data_version = car['DataVersion']
+
+# --- 1b. shareable test-car schematic ---------------------------------------
+# Start from the gametest car (cog swap + wheel already applied above) and make
+# it drive-ready out of the box. The car's existing frequencies (probed from
+# tones' template): steering receivers use the order-swapped pair
+# (lime_glazed_terracotta, lime_wool) / (lime_wool, lime_glazed_terracotta);
+# the drivetrain gearshift receivers use (lime_terracotta, lime_wool) /
+# (lime_wool, lime_terracotta). BRAKE gets a fresh pair (lime_dye x2) into the
+# four above-mount links, flipped from unused transmitters into receivers.
+sch = nbtlib.load(f'{OUT}/race_car.nbt')
+
+def item(name):
+    return tag.Compound({'id': tag.String(name), 'count': tag.Int(1)})
+
+def binding(first, second):
+    return tag.Compound({'First': tag.String(first), 'Second': tag.String(second)})
+
+GLAZED, WOOL, TERRA, DYE = ('minecraft:lime_glazed_terracotta', 'minecraft:lime_wool',
+                            'minecraft:lime_terracotta', 'minecraft:lime_dye')
+
+# The wheel: pre-bound channels + a gentle failsafe brake. If steering or
+# throttle feel swapped on a given build, re-bind in game (sneak-right-click
+# cycles the target) — the frequencies themselves are the car's own.
+wheel_nbt = tag.Compound({
+    'id': tag.String('aeronautics_simwheel:sim_steering_wheel'),
+    'Bindings': tag.Compound({
+        'STEER_RIGHT': binding(GLAZED, WOOL),
+        'STEER_LEFT': binding(WOOL, GLAZED),
+        'THROTTLE': binding(TERRA, WOOL),
+        'BTN_1': binding(WOOL, TERRA),   # reverse (the car's other gearshift pair)
+        'BRAKE': binding(DYE, DYE),
+    }),
+    'LockDeg': tag.Float(450.0),
+    'FailsafeBrake': tag.Int(6),
+})
+
+brake_link_nbt = tag.Compound({
+    'id': tag.String('create:redstone_link'),
+    'FrequencyFirst': item(DYE),
+    'FrequencyLast': item(DYE),
+    'Transmit': tag.Int(0),
+    'Transmitter': tag.Byte(0),
+    'Receive': tag.Int(0),
+    'ReceivedChanged': tag.Byte(0),
+})
+
+sch['palette'].append(tag.Compound({
+    'Name': tag.String('create:redstone_link'),
+    'Properties': tag.Compound({
+        'powered': tag.String('false'),
+        'receiver': tag.String('true'),
+        'facing': tag.String('up'),
+    }),
+}))
+brake_receiver_state = len(sch['palette']) - 1
+
+ABOVE_MOUNTS = {(1, 2, 1), (1, 2, 3), (7, 2, 1), (7, 2, 3)}
+flipped = 0
+for b in sch['blocks']:
+    pos = tuple(int(p) for p in b['pos'])
+    name = str(sch['palette'][int(b['state'])]['Name'])
+    if pos in ABOVE_MOUNTS and name == 'create:redstone_link':
+        b['state'] = tag.Int(brake_receiver_state)
+        b['nbt'] = brake_link_nbt
+        flipped += 1
+    if pos == wheel_pos:
+        b['nbt'] = wheel_nbt
+assert flipped == 4, f'expected 4 above-mount links, flipped {flipped}'
+
+os.makedirs('schematics', exist_ok=True)
+sch.save('schematics/simwheel_race_car.nbt', gzipped=True)
 
 # --- 2. sim control rig ------------------------------------------------------
 # Our control block + a real create:redstone_link receiver on red wool
@@ -101,4 +177,5 @@ control_rig = nbtlib.File({
 })
 control_rig.save(f'{OUT}/control_rig.nbt', gzipped=True)
 
-print(f'wrote {OUT}/race_car.nbt (palette swap: {swapped}), {OUT}/control_rig.nbt')
+print(f'wrote {OUT}/race_car.nbt (palette swap: {swapped}), {OUT}/control_rig.nbt, '
+      f'schematics/simwheel_race_car.nbt (brake receivers: {flipped})')

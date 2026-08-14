@@ -2,6 +2,9 @@ plugins {
     id 'net.neoforged.moddev' version '2.0.143'
 }
 
+version = '0.2.0'
+base { archivesName = 'aeronautics-simwheel' }
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
