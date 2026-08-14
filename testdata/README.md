@@ -19,18 +19,16 @@ What's in it (parsed from the palette + block-entity NBT):
 
 ## Why it matters for SimWheel
 
-1. **Offroad internals (since verified from source — DESIGN.md §6.2.4/§6.7)**:
+1. **Offroad internals (since verified from source — DESIGN.md §2 S3, §6.2)**:
    wheel mounts are raycast-suspension force emitters with no constraints and no
    tire colliders; steering is analog redstone on the mount's side faces (±15
    steps → ±30° lock) — this car doesn't wire that up and instead skid-steers
    via the `directional_gearshift`. The `ScrollValue: 180` on the mounts is
    **suspension strength maxed out** (range 5–180), not a steering value.
-   Ground-vehicle FFB comes from `WheelMountSource` synthesis.
-2. **Phase 0/1 test target once retrofitted**: add a `simulated:steering_wheel`
-   + a swivel-bearing steering rack (or throttle lever on the engine line) to get
-   an analog-steerable variant; keep this original as the control for comparing
-   feel against the lectern/link path (which is what Create: Tweaked Controllers
-   drives).
+2. **The ancestor of the shipped test car**: the shareable
+   `schematics/simwheel_race_car.nbt` (and the gametest structures) are
+   generated from this template by `tools/make_test_structures.py` — lectern
+   steering swapped for the Sim Steering Wheel's wiring.
 3. As-built it is a good **integration fixture**: assembling it in a dev world
    exercises Simulated + Offroad + physics assembly without any of our code.
 

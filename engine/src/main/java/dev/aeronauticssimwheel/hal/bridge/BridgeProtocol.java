@@ -7,8 +7,10 @@ import java.util.Optional;
 
 /**
  * Wire protocol v1 between the mod and the native FFB bridge sidecar
- * (DESIGN.md §6.6). Backend-agnostic: the first sidecar implementation uses
- * the MOZA SDK on Windows; an SDL3 sidecar speaks the same frames later.
+ * (DESIGN.md §6.6). Backend-agnostic: the shipping Rust sidecar speaks it
+ * over DirectInput on Windows and evdev on Linux ({@code sidecar/src/
+ * protocol.rs} is the byte-for-byte mirror, golden-vector-pinned on both
+ * sides); any future backend (SDL3, vendor SDK) speaks the same frames.
  *
  * <p>UDP, localhost, little-endian. Header: magic "AWFB", u8 version,
  * u8 frame type, u32 sequence. Malformed input never throws out of

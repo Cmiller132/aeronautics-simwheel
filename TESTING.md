@@ -9,8 +9,10 @@ Everything you need is in the latest
 [GitHub release](https://github.com/Cmiller132/aeronautics-simwheel/releases):
 `simwheel-testkit-x.y.z.mrpack` (the game side, everything bundled) and the
 force-feedback bridge for your OS —
-`simwheel-ffb-bridge-x.y.z-windows.zip` or
-`simwheel-ffb-bridge-x.y.z-linux-x86_64.tar.gz`.
+`simwheel-ffb-bridge-...-windows.zip` or
+`simwheel-ffb-bridge-...-linux-x86_64.tar.gz`. (A bridge from an older
+release keeps working with a newer mod — the wire protocol is stable; the
+release notes say when that ever changes.)
 
 ## Setup — about 10 minutes
 
@@ -80,8 +82,18 @@ running = everything still works, just no forces.)
    steering and applies a parking brake automatically — the car stops itself.
 
 The debug HUD (top-left while engaged) shows the detected device — it should
-say `bridge/...your wheelbase...` — plus commanded vs. actual steering angle
-and the live FFB torque.
+say `bridge/...your wheelbase...` — plus commanded vs. actual steering angle,
+the live FFB torque, and the FFB loop rate (should read ~250 Hz).
+
+### Optional: float steering (mount linking)
+
+The schematic's steering is wired the classic redstone way (±15 steps —
+already smooth). To try the un-quantized float path: hold a **stick**,
+right-click the wheel block ("linking on"), right-click the steered wheel
+mounts (the front pair), then right-click the wheel again. Those mounts now
+take steering and brake as exact floats, bypassing redstone entirely. Tell
+us if you can feel the difference in small corrections around center —
+that's the point of the feature. (Unlink the same way any time.)
 
 ## What you should feel (this is the part we need tested!)
 
@@ -106,6 +118,17 @@ and the live FFB torque.
   3. Re-engage afterward — forces must come back only after a deliberate
      **J** re-engage, never on their own.
 
+## Tuning the feel yourself
+
+Everything is live-tunable — no restart, no rebuild. In the instance folder,
+open `config/aeronautics_simwheel-feel.toml` (it's written with commented
+defaults on first launch), edit, save: the change applies on the next
+corner. Interesting knobs: `telemetryGain` (how much tire force you feel),
+`damperNmPerDegPerS` / `frictionNm` (the baseline weight), `maxTorqueNm`
+(the hard clamp — raise carefully). A broken edit keeps the last good
+values; the HUD's config line tells you what state the file is in. If you
+find numbers that feel great, send us the file.
+
 ## If something's off
 
 | Symptom | Fix |
@@ -115,12 +138,15 @@ and the live FFB torque.
 | Bridge prints a permission error (Linux) | `sudo usermod -aG input $USER`, log out and back in |
 | Steering direction reversed | Sneak-right-click the wheel block to cycle to `STEER_LEFT`/`STEER_RIGHT`, re-bind each to the other's item pair (lime wool + lime glazed terracotta, both orders) — or just report it, it's a one-line fix for us |
 | Car won't move | Assembled (right-clicked the assembler)? Engaged (J while seated)? Holding W? |
-| Wheel feels notchy/oscillates | Report it with the HUD torque reading — gain tuning is exactly the feedback we need |
+| Wheel feels notchy/oscillates | Report it with the HUD torque reading and your feel TOML — gain tuning is exactly the feedback we need |
+| HUD loop rate far below 250 Hz | Report it with your OS + CPU — the loop stats line (`loop … Hz late …`) is designed for exactly this report |
 
 ## What to send back
 
 - How the **steering weight** feels driving (corners, straights, over the
   car's own curb strikes) and anything that feels wrong or artificial.
+- Whether float steering (the stick-linking section above) feels different
+  from the redstone default.
 - The kill-test results (the three above) — pass/fail each.
 - On any problem: `logs/latest.log` from the instance folder, plus whatever
   the bridge window printed.

@@ -1,6 +1,11 @@
 # Research notes — August 2026
 
-Findings from a deep-dive into (a) the Create Aeronautics ecosystem and (b) driving a MOZA R9 from a Java Minecraft mod. Kept as the factual base for implementation decisions; place at `docs/RESEARCH.md` in the repo.
+Findings from a deep-dive into (a) the Create Aeronautics ecosystem and (b)
+driving a MOZA R9 from a Java Minecraft mod. This is the **factual base** the
+design decisions rest on — the decisions themselves live in
+[`DESIGN.md`](DESIGN.md). Where a finding led to a choice that has since been
+built, an **Outcome** note marks it; the findings are otherwise left as
+recorded (source-verified August 2026).
 
 ## 1. The mod ecosystem
 
@@ -80,6 +85,14 @@ There is no pilot seat capturing WASD. The pilot physically holds/uses input blo
 
 **No Java game with real wheel FFB was found — this would be a first.** Minecraft precedents are input-only (MC Steering Wheel Support) or rumble-only (Controlify).
 
+> **Outcome (built, 2026-08):** route 2 won — the Rust sidecar in
+> `sidecar/`, speaking a localhost-UDP protocol (`AWFB`). But it uses **raw
+> platform PID stacks rather than SDL3**: DirectInput on Windows, kernel
+> evdev (`hid-universal-pidff`) on Linux. That sidesteps every SDL haptic
+> bug listed above and needs no vendor SDK — the R9 is a standard PID device
+> on both. SDL3 remains a fallback if a native backend ever proves
+> inadequate; the MOZA SDK remains an optional enhancement layer.
+
 ### The torque model (how sims compute FFB)
 
 Each physics step, compute one signed steering-column torque; stream it as a single **infinite-duration constant-force effect whose parameters are updated in place** (`SDL_UpdateHapticEffect` / `IDirectInputEffect::SetParameters` with type-specific params only — never recreate the effect). Real sims update at 60 Hz (iRacing) to 333–400 Hz (AC, rF2); wheelbase firmware smooths between updates.
@@ -122,9 +135,18 @@ Read directly from `offroad/.../wheel_mount/WheelMountBlockEntity.java` (Simulat
 
 ## 4. Open items to verify on hardware
 
-- SDL3 haptics against a real R9 on Windows (expected fine — strictly PID-compliant — but unproven; no MOZA-specific SDL bug reports exist either way).
-- Behavior of high-rate `SDL_UpdateHapticEffect` on the R9 (SDL issue #12511).
-- Whether pedals enumerate through the wheelbase USB or as a separate HID device (affects axis discovery UX).
+(Updated for the built DirectInput/evdev backends — the authoritative
+known-unproven list lives in [`sidecar/README.md`](../sidecar/README.md).)
+
+- High-rate constant-force parameter updates on the R9 specifically, on both
+  backends (SDL issue #12511 catalogues driver quirks on *other* bases; MOZA
+  is strictly PID-compliant, expected fine — verify).
+- The Linux evdev sign convention (direction `0x4000` + signed level) versus
+  DirectInput's — conformance proves magnitudes and timing, not which way
+  the rim turns; the first hardware trip verifies it (`--invert-ffb` is the
+  remedy).
+- Whether pedals enumerate through the wheelbase USB or as a separate HID
+  device (affects axis-binding UX, not the bridge).
 - Exact MOZA SDK terms/platforms, if ever pursued.
 
 ## Key links

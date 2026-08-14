@@ -19,7 +19,11 @@ expiry so the hardware self-zeroes if this process ever stops running.
 Being a separate process is the point: FFB output is immune to JVM GC pauses,
 and the **bridge-side watchdog zeroes torque even if the game hard-crashes
 mid-stream** — every TORQUE frame carries its own watchdog interval, and
-silence past it cuts output.
+silence past it cuts output. Ctrl-C / SIGTERM (and console close on Windows)
+shut down cleanly: the device is stopped and the effect erased on the way
+out.
+
+File-by-file source map: [`src/README.md`](src/README.md).
 
 ## Build
 
