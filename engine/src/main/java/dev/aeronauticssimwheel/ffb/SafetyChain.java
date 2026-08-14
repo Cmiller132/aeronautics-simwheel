@@ -81,6 +81,11 @@ public final class SafetyChain {
         if (state == State.FAULT) {
             return 0f; // panic() already zeroed lastOutput
         }
+        // The safety boundary trusts nothing upstream: a NaN/Inf request would
+        // otherwise poison lastOutput permanently through clamp arithmetic.
+        if (!Float.isFinite(requestedNm)) {
+            requestedNm = 0f;
+        }
 
         float target;
         if (state == State.ENGAGED) {

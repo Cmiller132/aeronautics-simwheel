@@ -22,6 +22,25 @@ class SafetyChainTest {
     }
 
     @Test
+    void nonFiniteRequestsNeverPoisonTheChain() {
+        // A NaN/Inf request must be treated as zero, not propagate through the
+        // clamp arithmetic into lastOutput forever (adversarial finding: two
+        // finite ±Float.MAX telemetry samples can overflow into ±Inf upstream).
+        SafetyChain chain = new SafetyChain(SafetyChain.Config.defaults());
+        chain.engage();
+        for (int i = 0; i < 1000; i++) {
+            chain.step(2.5f, DT, true); // ramp in with real torque
+        }
+        chain.step(Float.NaN, DT, true);
+        chain.step(Float.NEGATIVE_INFINITY, DT, true);
+        for (int i = 0; i < 10; i++) {
+            float out = chain.step(1.0f, DT, true);
+            assertTrue(Float.isFinite(out), "chain poisoned: " + out);
+            assertTrue(Math.abs(out) <= 2.5f + EPS);
+        }
+    }
+
+    @Test
     void clampInvariantUnderRandomInput() {
         SafetyChain chain = new SafetyChain(SafetyChain.Config.defaults());
         chain.engage();

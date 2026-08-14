@@ -4,7 +4,11 @@ import com.simibubi.create.Create;
 import com.simibubi.create.content.redstone.link.IRedstoneLinkable;
 import com.simibubi.create.content.redstone.link.RedstoneLinkNetworkHandler.Frequency;
 import dev.aeronauticssimwheel.registry.SimWheelRegistry;
+import dev.ryanhcode.sable.api.block.BlockEntitySubLevelActor;
+import dev.ryanhcode.sable.api.physics.handle.RigidBodyHandle;
+import dev.ryanhcode.sable.sublevel.ServerSubLevel;
 import net.createmod.catnip.data.Couple;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.HolderLookup;
@@ -47,8 +51,15 @@ import java.util.UUID;
  * seated within reach (sub-level pose aware); the first accepted frame latches
  * the driver and their seat until they stop sending or leave the seat. Stored
  * list-shaped nowhere yet — multi-station is a deliberate v2 extension seam.
+ *
+ * <p><b>FFB rig root (Phase 2a)</b>: as a {@link BlockEntitySubLevelActor} on
+ * an assembled craft, Sable calls {@link #sable$physicsTick} every physics
+ * substep — while a driver is latched, the {@link GroundTelemetrySampler}
+ * reads the craft's wheel mounts there and the server tick flushes the
+ * accumulated torque samples to the driver.
  */
-public final class SimSteeringWheelBlockEntity extends BlockEntity {
+public final class SimSteeringWheelBlockEntity extends BlockEntity
+        implements BlockEntitySubLevelActor {
 
     public static final int INPUT_TIMEOUT_TICKS = 30;
     /** Direct authority with a sanity clamp: 1080°/s at 20 tps. */
@@ -73,6 +84,9 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity {
     /** Last values pushed to redstone neighbors / clients, for change detection. */
     private int lastEmittedSteer = Integer.MIN_VALUE;
     private boolean lastEmittedEngaged;
+
+    /** Phase 2a rig: sampled per physics substep, flushed per game tick. */
+    private final GroundTelemetrySampler telemetry = new GroundTelemetrySampler();
 
     /** Transient placeholder-UX cursor: link channels, then the two settings. */
     private int configCursor;
@@ -137,6 +151,7 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity {
         for (SimChannel ch : SimChannel.values()) {
             setLevel(ch, ch == SimChannel.BRAKE ? failsafeBrake : 0);
         }
+        telemetry.reset();
     }
 
     public static void serverTick(Level level, BlockPos pos, BlockState state,
@@ -158,6 +173,24 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity {
             level.updateNeighborsAt(pos, state.getBlock());
             level.sendBlockUpdated(pos, state, state, 3);
         }
+
+        if (level instanceof ServerLevel serverLevel) {
+            be.telemetry.flush(serverLevel, be.user);
+        }
+    }
+
+    /** Sable, per physics substep on an assembled craft (Phase 2a rig). */
+    @Override
+    public void sable$physicsTick(ServerSubLevel subLevel, RigidBodyHandle handle,
+                                  double timeStep) {
+        if (engaged() && !inputTimedOut()) {
+            telemetry.sampleSubstep(this, subLevel, timeStep);
+        }
+    }
+
+    /** The Phase 2a rig state (gametests, HUD-side debugging). */
+    public GroundTelemetrySampler telemetry() {
+        return telemetry;
     }
 
     private boolean inputTimedOut() {

@@ -43,6 +43,10 @@ public final class SimWheelHud implements LayeredDraw.Layer {
             y += 10;
             g.drawString(mc.font, String.format("FFB %+.2f Nm [%s]",
                     ffb.lastOutputNm(), ffb.safetyState()), 4, y, 0xFFFFD080);
+            y += 10;
+            g.drawString(mc.font, String.format("telemetry %+.2f Nm [%s]",
+                    ffb.lastTelemetryNm(), ffb.telemetryStale() ? "stale" : "live"),
+                    4, y, 0xFF80D0FF);
         } else {
             g.drawString(mc.font, "sit in a seat, look at the Sim Steering Wheel, J = engage",
                     4, y, 0xFFA0A0A0);

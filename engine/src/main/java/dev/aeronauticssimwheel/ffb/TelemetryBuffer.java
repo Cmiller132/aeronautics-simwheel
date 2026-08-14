@@ -38,6 +38,13 @@ public final class TelemetryBuffer {
         }
     }
 
+    /** Drop all samples and recovery state (rig teardown / server change). */
+    public synchronized void clear() {
+        samples.clear();
+        stale = false;
+        recoveryStart = Double.NEGATIVE_INFINITY;
+    }
+
     /** Reconstruct the torque for the current instant (server-timeline seconds). */
     public synchronized float sample(double nowSeconds) {
         double t = nowSeconds - PLAYBACK_DELAY_S;

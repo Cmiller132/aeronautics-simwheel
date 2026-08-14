@@ -33,6 +33,11 @@ public final class SimWheelClient {
     private SimWheelClient() {
     }
 
+    /** The FFB pipeline — packet handlers feed telemetry/events through this. */
+    public static FfbController ffb() {
+        return ffb;
+    }
+
     public static void init(IEventBus modBus) {
         input = new WheelInput();
         link = new SimWheelLink();

@@ -2,7 +2,7 @@
 
 Sim racing wheel control and **true force feedback** for [Create: Aeronautics / The Simulated Project](https://github.com/Creators-of-Aeronautics/Simulated-Project), targeting the MOZA R9 wheelbase + pedals (and, by extension, any DirectInput/PID force-feedback wheel).
 
-> Status: **rebuilt around the Sim Steering Wheel block — the single control surface.** The pure-JVM engine (`engine/`: device HAL + FFB core with safety chain, telemetry buffer, feel components incl. the new soft lock) is unit-tested and green. The mod (`mod/`) implements the block, its link channels, seat occupancy, and the client link/FFB loop; gametests cover the steering redstone contract, link transmission, the failsafe brake, and race-car physics assembly. *The gametest suite was rewritten in a session without access to the mod maven repos — run `./gradlew :mod:runGameTest` before trusting a build.*
+> Status: **Phase 2a landed — the wheel block is the single control surface AND a live telemetry rig.** The pure-JVM engine (`engine/`: device HAL + FFB core with safety chain, telemetry buffer, ground torque model, strike detector, soft lock) is unit-tested and green. The mod (`mod/`) implements the block, its link channels, seat occupancy, the server-side ground-telemetry sampler (reads the craft's wheel mounts every physics substep, ships column torque to the driver at substep resolution), and the client link/FFB loop with telemetry + contact-strike reconstruction in the mix. Full gametest suite green on a real headless server (steering contract, link transmission, failsafe brake, race-car assembly, race-car ground telemetry end to end).
 > - [`docs/RESEARCH.md`](docs/RESEARCH.md) — technical findings (ecosystem, hardware, FFB routes, wheel-mount physics)
 > - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture & decision record
 
@@ -24,7 +24,7 @@ Sim hardware talks to the Sim Steering Wheel block and to **nothing else** — n
 
 If the structure templates are stale (e.g. `control_rig.nbt` still contains the old block id), regenerate them first: `python3 -m pip install nbtlib && python3 tools/make_test_structures.py`.
 
-- `./gradlew :mod:runGameTest` — headless server gametests: steering redstone contract (stock convention, direct authority, timeout recenter), link-channel transmission at analog levels, failsafe-brake latch, race-car physics assembly (primary test vehicle: [`testdata/tones_template_race_car.nbt`](testdata/README.md)).
+- `./gradlew :mod:runGameTest` — headless server gametests: steering redstone contract (stock convention, direct authority, timeout recenter), link-channel transmission at analog levels, failsafe-brake latch, race-car physics assembly, and race-car ground telemetry (the sim wheel rides the assembled craft, steers it over its own link frequencies, and the sampled tire-force torque is asserted plausible; primary test vehicle: [`testdata/tones_template_race_car.nbt`](testdata/README.md)). Note: gametests in a batch share one level — every test using link frequencies binds a frequency unique to that test.
 - `./gradlew :mod:runClient` — full dev client with the whole mod stack. Place a `sim_steering_wheel` on a craft, sit in a seat, look at it and press **J**; **K** toggles a hardware-free sine-sweep demo input; the debug HUD shows device, commanded vs. in-game angle, lock, and safety-chain torque.
 - `./gradlew :mod:runClientSelftest` — same client, logs SimWheel input/FFB state and quits by itself (CI-ish smoke test).
 
@@ -57,7 +57,7 @@ Drive (and later fly) Simulated-Project vehicles with a real wheel and pedals: a
 
 ## Roadmap
 
-See [`docs/DESIGN.md` §11](docs/DESIGN.md) for phases with exit criteria. In short: **now** — this block, gametested; **2a** — tire-force telemetry (`WheelMountSource`); **2b** — MOZA bridge on hardware; **2c** — end-to-end reactivity; **3** — direct wheel-mount linking (float steering/brake into the native formulas), art pass, config screen; **4** — kinetic output + swivel-bearing planes; **5** — public release.
+See [`docs/DESIGN.md` §11](docs/DESIGN.md) for phases with exit criteria. In short: **done** — the block (gametested) and **2a** tire-force telemetry (wheel-mount sampler → substep torque packets → client reconstruction, gametested end to end); **next: 2b** — MOZA bridge on hardware; **2c** — end-to-end reactivity + cue scalars; **3** — direct wheel-mount linking (float steering/brake into the native formulas), art pass, config screen; **4** — kinetic output + swivel-bearing planes; **5** — public release.
 
 ## Safety (direct-drive wheels can hurt you)
 

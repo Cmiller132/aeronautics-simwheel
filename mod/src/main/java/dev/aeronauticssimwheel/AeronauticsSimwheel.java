@@ -3,6 +3,8 @@ package dev.aeronauticssimwheel;
 import com.mojang.logging.LogUtils;
 import dev.aeronauticssimwheel.client.SimWheelClient;
 import dev.aeronauticssimwheel.gametest.SimWheelGameTests;
+import dev.aeronauticssimwheel.network.FfbEventPacket;
+import dev.aeronauticssimwheel.network.FfbTelemetryPacket;
 import dev.aeronauticssimwheel.network.SimWheelInputPacket;
 import dev.aeronauticssimwheel.registry.SimWheelRegistry;
 import net.neoforged.bus.api.IEventBus;
@@ -29,7 +31,11 @@ public final class AeronauticsSimwheel {
         modEventBus.addListener(this::onRegisterGameTests);
         modEventBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1")
                 .playToServer(SimWheelInputPacket.TYPE, SimWheelInputPacket.CODEC,
-                        SimWheelInputPacket::handle));
+                        SimWheelInputPacket::handle)
+                .playToClient(FfbTelemetryPacket.TYPE, FfbTelemetryPacket.CODEC,
+                        FfbTelemetryPacket::handle)
+                .playToClient(FfbEventPacket.TYPE, FfbEventPacket.CODEC,
+                        FfbEventPacket::handle));
         if (FMLEnvironment.dist.isClient()) {
             SimWheelClient.init(modEventBus);
         }

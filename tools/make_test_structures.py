@@ -6,6 +6,10 @@
    on top of the rotation_speed_controller and feeds both directional_gearshifts,
    so it must stay a real large cogwheel (DnDecor cogs are functional reskins);
    swapping lets the test env drop the DnDecor dependency.
+   Phase 2a: a sim_steering_wheel is added at (3,2,2) (free, chassis below) so
+   the assembled craft carries the FFB rig root — the ground-telemetry gametest
+   binds its STEER channels to the car's own link frequencies and drives the
+   whole chain: wheel BE → link net → mount side faces → tire forces → sampler.
 2. control_rig.nbt — 5x5x5 rig: smooth stone floor, our sim_steering_wheel and
    a create:redstone_link receiver (red wool pair) for the analog-transmission
    gametest.
@@ -28,6 +32,20 @@ for entry in car['palette']:
         entry['Name'] = tag.String('create:large_cogwheel')
         swapped += 1
 assert swapped == 1, f'expected exactly 1 dndecor palette entry, got {swapped}'
+
+# Phase 2a: mount the sim wheel on the chassis so the craft carries the rig.
+wheel_pos = (3, 2, 2)
+occupied = {tuple(int(p) for p in b['pos']) for b in car['blocks']}
+assert wheel_pos not in occupied, f'{wheel_pos} unexpectedly occupied'
+assert (wheel_pos[0], wheel_pos[1] - 1, wheel_pos[2]) in occupied, 'wheel needs chassis below'
+car['palette'].append(tag.Compound({
+    'Name': tag.String('aeronautics_simwheel:sim_steering_wheel'),
+    'Properties': tag.Compound({'facing': tag.String('north')}),
+}))
+car['blocks'].append(tag.Compound({
+    'pos': nbtlib.List[tag.Int]([tag.Int(wheel_pos[0]), tag.Int(wheel_pos[1]), tag.Int(wheel_pos[2])]),
+    'state': tag.Int(len(car['palette']) - 1),
+}))
 car.save(f'{OUT}/race_car.nbt', gzipped=True)
 
 data_version = car['DataVersion']

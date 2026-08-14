@@ -96,4 +96,11 @@ public final class EventImpulses {
         absorbPending();
         return activeCount;
     }
+
+    /** Drop pending and active impulses (rig teardown — a strike must not
+     *  survive a disengage and fire into the next vehicle). */
+    public synchronized void clear() {
+        pending.clear();
+        activeCount = 0;
+    }
 }
