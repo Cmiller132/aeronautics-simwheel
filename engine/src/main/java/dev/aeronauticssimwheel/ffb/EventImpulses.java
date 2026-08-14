@@ -10,11 +10,13 @@ import java.util.Deque;
  * locally as exponentially decaying torque impulses summed into the mixer's
  * local-feel input.
  *
- * <p>Pure JVM, single-writer (FFB thread) with events posted from the network
- * thread through a bounded queue — a burst of malformed/hostile events can
- * never grow memory or output unboundedly: the queue caps at
- * {@value #MAX_PENDING} and active impulses at {@value #MAX_ACTIVE}; the
- * SafetyChain still clamps whatever this produces.
+ * <p>Pure JVM; every public method is synchronized — events arrive from the
+ * network thread, {@link #step} runs on the FFB thread, and {@link #clear}
+ * may be called from either (an unsynchronized step() racing a game-thread
+ * clear() could resurrect a cleared impulse — found by review). A burst of
+ * malformed/hostile events can never grow memory or output unboundedly: the
+ * queue caps at {@value #MAX_PENDING} and active impulses at
+ * {@value #MAX_ACTIVE}; the SafetyChain still clamps whatever this produces.
  */
 public final class EventImpulses {
 
@@ -52,7 +54,7 @@ public final class EventImpulses {
      * FFB thread: advance decay by dt and return the summed impulse torque.
      * Newly posted events start at full amplitude on the step they are absorbed.
      */
-    public float step(double dtSeconds) {
+    public synchronized float step(double dtSeconds) {
         absorbPending();
         float sum = 0f;
         int write = 0;
@@ -92,7 +94,7 @@ public final class EventImpulses {
         }
     }
 
-    public int activeCount() {
+    public synchronized int activeCount() {
         absorbPending();
         return activeCount;
     }

@@ -106,7 +106,6 @@ pub struct DirectInputDevice {
     /// Suppress the velocity sample right after (re)acquisition — a stale
     /// prev_deg against a fresh angle would synthesize an enormous spike.
     skip_vel_sample: bool,
-    input_fault: bool,
     output_fault: bool,
     /// Owned, stable storage for the effect parameters — DirectInput keeps
     /// the pointer for the effect's lifetime (adversarial finding: stack
@@ -359,7 +358,7 @@ impl DirectInputDevice {
                 hasher = hasher.wrapping_mul(0x0100_0193);
             }
 
-            let mut dev = DirectInputDevice {
+            let dev = DirectInputDevice {
                 _di: di,
                 device,
                 effect,
@@ -371,7 +370,6 @@ impl DirectInputDevice {
                 prev_deg: 0.0,
                 vel_deg_per_s: 0.0,
                 skip_vel_sample: true,
-                input_fault: false,
                 output_fault: false,
                 cf,
                 _axes: axes,
@@ -516,7 +514,6 @@ impl FfbDevice for DirectInputDevice {
             );
             match hr {
                 Ok(()) => {
-                    self.input_fault = false;
                     let deg = raw.lx as f32 / 32767.0 * (self.range_deg / 2.0);
                     if self.skip_vel_sample {
                         // First sample after (re)acquire: seed, don't differentiate.
@@ -542,7 +539,6 @@ impl FfbDevice for DirectInputDevice {
                     }
                 }
                 Err(e) if e.code().0 == DIERR_INPUTLOST || e.code().0 == DIERR_NOTACQUIRED => {
-                    self.input_fault = true;
                     if !self.connection_lost {
                         // Entering the lost state disarms immediately, so a
                         // START arriving mid-outage can't become authority
@@ -571,7 +567,6 @@ impl FfbDevice for DirectInputDevice {
                     }
                 }
                 Err(_) => {
-                    self.input_fault = true;
                     WheelState {
                         steering_deg: self.prev_deg,
                         steering_vel_deg_per_s: 0.0,

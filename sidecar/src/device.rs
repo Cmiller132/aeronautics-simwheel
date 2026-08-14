@@ -13,6 +13,9 @@ pub struct WheelState {
 /// Rated torque resolution shared by the platform backends: explicit flag
 /// wins; known MOZA R-series names carry vendor numbers; anything else must
 /// be told (a wrong rating rescales every Nm cap in the whole chain).
+/// (cfg: only the real-device backends call this — sim-only platforms like
+/// macOS otherwise flag it dead; tests still cover it everywhere.)
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 pub fn resolve_rated_nm(name: &str, explicit: Option<f32>) -> Result<f32, String> {
     if let Some(nm) = explicit {
         return Ok(nm);

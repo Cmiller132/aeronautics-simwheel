@@ -24,19 +24,4 @@ public final class FeelEffects {
         double magnitude = Math.min(muNm, muNm * Math.abs(velDegPerS) / epsilonDegPerS);
         return (float) (-magnitude * Math.signum(velDegPerS));
     }
-
-    /**
-     * Detent bump near every 45° multiple (only while DETENT_MODIFIER is held —
-     * parity with vanilla Shift snapping): a short cosine well pulling toward the
-     * nearest detent, zero outside ±halfWidth.
-     */
-    public static float detent(double wheelDeg, float peakNm, double halfWidthDeg) {
-        double nearest = Math.round(wheelDeg / 45.0) * 45.0;
-        double offset = wheelDeg - nearest;
-        if (Math.abs(offset) >= halfWidthDeg) {
-            return 0f;
-        }
-        // Pull toward the detent center, strongest mid-flank, zero at center and edges
-        return (float) (-peakNm * Math.sin(Math.PI * offset / halfWidthDeg));
-    }
 }

@@ -1,12 +1,7 @@
 package dev.aeronauticssimwheel.sim;
 
-import dev.aeronauticssimwheel.ffb.FeelEffects;
-import dev.aeronauticssimwheel.ffb.Mixer;
-import dev.aeronauticssimwheel.ffb.SafetyChain;
-import dev.aeronauticssimwheel.ffb.SyncSpring;
-import dev.aeronauticssimwheel.ffb.TelemetryBuffer;
-import dev.aeronauticssimwheel.ffb.VirtualWheelPredictor;
-import dev.aeronauticssimwheel.hal.NullWheelDevice;
+import dev.aeronauticssimwheel.ffb.FfbPipeline;
+import dev.aeronauticssimwheel.ffb.StrikeDetector;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -15,13 +10,19 @@ import java.nio.file.Path;
 
 /**
  * Headless end-to-end FFB run (DESIGN.md §10.5): the race car drives a scripted
- * 24 s lap over block terrain; hinge torque is sampled at the physics substep
- * rate (60 Hz), batched into 20 Hz "packets" like the real wire, and pushed
- * through the REAL client pipeline — TelemetryBuffer → VirtualWheelPredictor →
- * SyncSpring → Mixer → SafetyChain → device — at 1 kHz with 150 Hz device writes.
+ * 26 s lap over block terrain; hinge torque is sampled at the physics substep
+ * rate (60 Hz), batched into 20 Hz "packets" like the real wire, strikes fire
+ * through the immediate event path, and everything plays through the REAL
+ * shipping composition — {@link FfbPipeline}: TelemetryBuffer + soft lock +
+ * damper/friction + EventImpulses → soft-knee mixer → SafetyChain — at the
+ * 250 Hz loop rate the mod runs.
+ *
+ * <p>Steering is direct authority (the sim wheel block, DESIGN.md §5.3): the
+ * hardware command IS the column angle — no slew chase, no predictor.
  *
  * <p>Phases: A smooth-road weave · B bumpy blocks + gravel · C curb strike ·
- * D steady corner · E telemetry dropout · F recovery weave.
+ * D steady corner · E telemetry dropout · F recovery weave · G into the soft
+ * lock (the wheel physically pushed past the block's ±450° range).
  *
  * <p>Usage: DrivingScenarioDemo [output.csv]
  */
@@ -29,20 +30,20 @@ public final class DrivingScenarioDemo {
 
     public static final double SPEED_MS = 15.0;
     public static final double SUBSTEP_DT = 1.0 / 60.0;
-    public static final double CLIENT_DT = 0.001;
+    /** The shipping FFB loop rate (FfbService.LOOP_HZ). */
+    public static final double CLIENT_DT = 1.0 / 250.0;
     public static final double TICK_DT = 0.05;
-    public static final double DEVICE_WRITE_DT = 1.0 / 150.0;
-    public static final double TOTAL_S = 24.0;
+    public static final double TOTAL_S = 26.0;
     public static final double DROPOUT_FROM_S = 17.0;
     public static final double DROPOUT_TO_S = 18.0;
+    public static final double LOCK_DEG = 450.0;
 
-    public record TraceRow(double t, double steerCmdDeg, double virtualDeg,
-                           double rawNm, double telemetryNm, double springNm,
-                           double outNm) {
+    public record TraceRow(double t, double steerCmdDeg, double rawNm,
+                           double telemetryNm, double impulseNm, double outNm) {
     }
 
-    public record Result(java.util.List<TraceRow> rows, NullWheelDevice device,
-                         double curbRawPeakT, double curbOutPeakT) {
+    public record Result(java.util.List<TraceRow> rows,
+                         double curbRawPeakT, double curbOutPeakT, int strikesFired) {
     }
 
     /** Scripted driver: what the hardware wheel is doing, in column degrees. */
@@ -55,8 +56,10 @@ public final class DrivingScenarioDemo {
             return Math.min(90.0, (t - 12.0) * 90.0);                 // D: wind into a corner
         } else if (t < 19.0) {
             return 90.0;                                              // E: hold through dropout
+        } else if (t < 24.0) {
+            return 25.0 * Math.sin(2.0 * Math.PI * 0.4 * (t - 19.0)); // F: recovery weave
         }
-        return 25.0 * Math.sin(2.0 * Math.PI * 0.4 * (t - 19.0));     // F: recovery weave
+        return Math.min(LOCK_DEG + 40.0, (t - 24.0) * 400.0);         // G: shove into the stop
     }
 
     public static Result run() {
@@ -75,96 +78,78 @@ public final class DrivingScenarioDemo {
                 .build();
 
         RaceCarFfbSim car = new RaceCarFfbSim(leftLane, rightLane);
-        TelemetryBuffer buffer = new TelemetryBuffer();
-        VirtualWheelPredictor predictor = new VirtualWheelPredictor();
-        SyncSpring spring = new SyncSpring(SyncSpring.Config.defaults());
-        Mixer mixer = new Mixer(2.5f);
-        SafetyChain chain = new SafetyChain(SafetyChain.Config.defaults());
-        NullWheelDevice device = NullWheelDevice.ffbCapable();
-
-        device.ffbStart();
-        chain.engage();
+        FfbPipeline pipeline = new FfbPipeline();
+        StrikeDetector strikes = new StrikeDetector(StrikeDetector.Config.defaults());
 
         // Server state
         double serverT = 0.0;
         double latestRawNm = 0.0;
         java.util.List<double[]> pendingSubsteps = new java.util.ArrayList<>();
-        // The kinetic wheel the server actually has (96°/s slew, like the BE)
-        VirtualWheelPredictor serverWheel = new VirtualWheelPredictor();
         double nextTickT = TICK_DT;
+        int strikesFired = 0;
 
         // Client state
         double prevSteerDeg = 0.0;
-        double nextDeviceWriteT = 0.0;
-        double lastWrittenNm = 0.0;
 
         java.util.List<TraceRow> rows = new java.util.ArrayList<>();
         double curbRawPeak = 0.0, curbRawPeakT = Double.NaN;
         double curbOutPeak = 0.0, curbOutPeakT = Double.NaN;
 
-        double q = 0.5 * 1.2 * SPEED_MS * SPEED_MS; // dynamic pressure at 15 m/s
-
         for (double t = 0.0; t < TOTAL_S; t += CLIENT_DT) {
             double steerCmd = steerCommandDeg(t);
+            boolean dropped = t >= DROPOUT_FROM_S && t < DROPOUT_TO_S;
 
             // --- SERVER (runs ahead of the client loop, substep rate) ---
             while (serverT <= t) {
-                serverWheel.setCommandedTarget(steerCmd);
-                serverWheel.step(SUBSTEP_DT);
-                latestRawNm = car.substep(SUBSTEP_DT, SPEED_MS, serverWheel.angleDeg());
+                // Direct authority: the command IS the column angle (§5.3)
+                latestRawNm = car.substep(SUBSTEP_DT, SPEED_MS, steerCmd);
                 pendingSubsteps.add(new double[]{serverT, latestRawNm});
+
+                // Immediate event path: the fastest-compressing steered corner
+                double compression = Math.max(car.leftCompressionRateMS(),
+                        car.rightCompressionRateMS());
+                StrikeDetector.Strike strike = strikes.step(compression, SUBSTEP_DT);
+                if (strike != null && !dropped) {
+                    pipeline.postEvent(strike.peakNm(), strike.tauSeconds());
+                    strikesFired++;
+                }
                 serverT += SUBSTEP_DT;
             }
             // Tick flush: deliver the batched substeps as one packet (unless dropped)
             if (t >= nextTickT) {
-                boolean dropped = t >= DROPOUT_FROM_S && t < DROPOUT_TO_S;
-                if (!dropped) {
+                if (!dropped && !pendingSubsteps.isEmpty()) {
                     for (double[] s : pendingSubsteps) {
-                        buffer.addSample(s[0], (float) s[1]);
+                        pipeline.postTelemetry(s[0], (float) s[1]);
                     }
-                    predictor.onMeasurement(serverWheel.angleDeg());
+                    pipeline.noteTelemetryBatch(
+                            pendingSubsteps.get(pendingSubsteps.size() - 1)[0], t);
                 }
                 pendingSubsteps.clear();
                 nextTickT += TICK_DT;
             }
 
-            // --- CLIENT (1 kHz FFB loop, real pipeline code) ---
-            predictor.setCommandedTarget(steerCmd);
-            predictor.step(CLIENT_DT);
-
+            // --- CLIENT (250 Hz FFB loop, the real shipping composition) ---
             double steerVel = (steerCmd - prevSteerDeg) / CLIENT_DT;
             prevSteerDeg = steerCmd;
 
-            float telemetryNm = buffer.sample(t);
-            float springNm = spring.torqueNm(steerCmd, steerVel, predictor.angleDeg(), q);
-            float damperNm = FeelEffects.damper(0.004f, q, 500.0, steerVel);
-            float frictionNm = FeelEffects.friction(0.15f, 5.0, steerVel);
-            float mixNm = mixer.mix(telemetryNm, springNm, damperNm, frictionNm, 0f);
-            float outNm = chain.step(mixNm, CLIENT_DT, true);
-
-            if (t >= nextDeviceWriteT) {
-                device.ffbUpdateTorque(outNm / 9f); // R9: 9 Nm device max
-                lastWrittenNm = outNm;
-                nextDeviceWriteT += DEVICE_WRITE_DT;
-            }
+            float outNm = pipeline.step(true, t, steerCmd, steerVel, LOCK_DEG, true, CLIENT_DT);
+            FfbPipeline.Components c = pipeline.lastComponents();
 
             if (t >= 10.0 && t <= 12.0) { // curb window
                 if (Math.abs(latestRawNm) > curbRawPeak) {
                     curbRawPeak = Math.abs(latestRawNm);
                     curbRawPeakT = t;
                 }
-                if (Math.abs(lastWrittenNm) > curbOutPeak) {
-                    curbOutPeak = Math.abs(lastWrittenNm);
+                if (Math.abs(outNm) > curbOutPeak) {
+                    curbOutPeak = Math.abs(outNm);
                     curbOutPeakT = t;
                 }
             }
 
-            if (Math.round(t * 1000) % 2 == 0) { // 500 Hz trace is plenty
-                rows.add(new TraceRow(t, steerCmd, predictor.angleDeg(),
-                        latestRawNm, telemetryNm, springNm, outNm));
-            }
+            rows.add(new TraceRow(t, steerCmd, latestRawNm,
+                    c.telemetryNm(), c.impulseNm(), outNm));
         }
-        return new Result(rows, device, curbRawPeakT, curbOutPeakT);
+        return new Result(rows, curbRawPeakT, curbOutPeakT, strikesFired);
     }
 
     public static void main(String[] args) throws IOException {
@@ -173,27 +158,28 @@ public final class DrivingScenarioDemo {
 
         Result r = run();
         try (PrintWriter w = new PrintWriter(Files.newBufferedWriter(out))) {
-            w.println("t,steerCmdDeg,virtualDeg,rawNm,telemetryNm,springNm,outNm");
+            w.println("t,steerCmdDeg,rawNm,telemetryNm,impulseNm,outNm");
             for (TraceRow row : r.rows()) {
-                w.printf("%.3f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f%n",
-                        row.t(), row.steerCmdDeg(), row.virtualDeg(),
-                        row.rawNm(), row.telemetryNm(), row.springNm(), row.outNm());
+                w.printf("%.3f,%.2f,%.4f,%.4f,%.4f,%.4f%n",
+                        row.t(), row.steerCmdDeg(), row.rawNm(),
+                        row.telemetryNm(), row.impulseNm(), row.outNm());
             }
         }
 
-        System.out.println("=== Driving scenario: race car, 15 m/s, 24 s ===");
+        System.out.println("=== Driving scenario: race car, 15 m/s, 26 s ===");
         printPhase(r, "A smooth weave      ", 0.5, 5.0);
         printPhase(r, "B bumpy blocks      ", 5.0, 10.0);
         printPhase(r, "C curb strike       ", 10.0, 12.0);
         printPhase(r, "D steady corner     ", 13.0, 17.0);
         printPhase(r, "E telemetry dropout ", 17.2, 18.0);
         printPhase(r, "F recovery          ", 19.0, 24.0);
+        printPhase(r, "G into the stop     ", 25.0, 26.0);
         System.out.printf("Curb strike: raw peak at t=%.3f s, rim peak at t=%.3f s -> latency %.0f ms%n",
                 r.curbRawPeakT(), r.curbOutPeakT(),
                 (r.curbOutPeakT() - r.curbRawPeakT()) * 1000);
+        System.out.printf("Strike events fired: %d%n", r.strikesFired());
         double maxOut = r.rows().stream().mapToDouble(x -> Math.abs(x.outNm())).max().orElse(0);
-        System.out.printf("Max |rim torque| = %.3f Nm (clamp 2.5) | device writes: %d%n",
-                maxOut, r.device().torqueWrites.size());
+        System.out.printf("Max |rim torque| = %.3f Nm (clamp 2.5)%n", maxOut);
         System.out.println("CSV: " + out.toAbsolutePath());
     }
 

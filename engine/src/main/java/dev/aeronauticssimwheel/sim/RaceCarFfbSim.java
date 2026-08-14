@@ -71,6 +71,16 @@ public final class RaceCarFfbSim {
         return x;
     }
 
+    /** Left-corner suspension compression rate, m/s (StrikeDetector input). */
+    public double leftCompressionRateMS() {
+        return left.compressionRateMS();
+    }
+
+    /** Right-corner suspension compression rate, m/s (StrikeDetector input). */
+    public double rightCompressionRateMS() {
+        return right.compressionRateMS();
+    }
+
     private static double clamp(double v, double magnitude) {
         return Math.max(-magnitude, Math.min(magnitude, v));
     }

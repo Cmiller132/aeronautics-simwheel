@@ -46,7 +46,21 @@ public record SimWheelInputPacket(BlockPos pos, float steering, float throttle,
 
     private static final double MAX_RANGE_SQ = 8 * 8;
 
+    /**
+     * Per-sender ingress budget, checked on the network thread BEFORE
+     * enqueueWork — a hostile client must not queue unbounded server
+     * main-thread tasks (the legitimate client sends ≤20 Hz + heartbeat).
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<java.util.UUID, PacketRateGate>
+            SENDER_GATES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int MAX_FRAMES_PER_SECOND = 60;
+
     public static void handle(SimWheelInputPacket packet, IPayloadContext context) {
+        if (context.player() instanceof ServerPlayer sender
+                && !SENDER_GATES.computeIfAbsent(sender.getUUID(),
+                        id -> new PacketRateGate(MAX_FRAMES_PER_SECOND)).tryAcquire()) {
+            return;
+        }
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) {
                 return;

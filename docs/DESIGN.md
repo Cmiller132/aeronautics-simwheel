@@ -93,7 +93,7 @@ One mod jar, strictly layered. `engine/` (hal + ffb) is a separate Gradle module
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-Threading (client): render thread polls devices and publishes an immutable snapshot per tick; a dedicated high-priority FFB thread (currently 250 Hz, 1 kHz with the bridge) computes feel through the safety chain and writes the device. The FFB thread never touches Minecraft objects.
+Threading (client): render thread polls devices and publishes an immutable snapshot per tick; the engine's `FfbService` owns a dedicated 250 Hz FFB thread (absolute-deadline `parkNanos` pacing, rolling jitter stats on the HUD) that computes feel through `FfbPipeline` and writes the device. When the bridge is active its STATE stream supplies the true hardware angle/velocity at loop rate — damper, friction and the soft lock react to the physical wheel, not the 20 Hz snapshot. The FFB thread never touches Minecraft objects, and engage/disengage edges are derived on the FFB thread from the snapshot, so no SafetyChain state ever crosses threads.
 
 ---
 
@@ -101,18 +101,37 @@ Threading (client): render thread polls devices and publishes an immutable snaps
 
 ```
 engine/                     # pure JVM, unit-tested, zero Minecraft imports
-├── hal/                    # WheelDevice, WheelAdapter, AxisProcessor, glfw/, bridge/
-└── ffb/                    # SafetyChain, SoftLock, FeelEffects, TelemetryBuffer,
-                            # Mixer, SoftKnee, EngagementStateMachine, …
+├── hal/                    # WheelDevice, WheelAdapter, AxisProcessor, glfw/, bridge/,
+│                           # HardwareAngleSource, FaultingDevice
+└── ffb/                    # FfbPipeline (the SHIPPING composition: TelemetryBuffer +
+                            # SoftLock + FeelEffects + EventImpulses → Mixer/SoftKnee →
+                            # SafetyChain), FfbService (250 Hz loop, pacing, device
+                            # lifecycle), FfbTuning (hot-swappable gains), StrikeDetector
 mod/  dev.aeronauticssimwheel
 ├── content/                # SimSteeringWheelBlock + BE + SimChannel
-├── network/                # SimWheelInputPacket
-├── client/                 # WheelInput, SimWheelLink, FfbController, SimWheelHud
+├── network/                # SimWheelInputPacket (+ per-sender rate gate)
+├── client/                 # WheelInput, SimWheelLink, FfbController (thin adapter),
+│                           # FeelConfig (hot-reload TOML), SimWheelHud
 ├── registry/               # block/item/BE registration
+├── HealthCheck             # §10.4 startup surface verification
 └── gametest/               # headless server tests
 ```
 
-**Mixin count: zero.** Every reach into the stack is public API or plain game mechanics (redstone, link network). The first mixin returns with wheel-mount linking (Phase 3, §5.5) and gets the §10.4 health-check treatment then.
+Torque is **Nm end-to-end**, including the HAL: `WheelDevice.ffbUpdateTorque`
+takes Nm and each backend owns its own conversion and clamps. (The original
+normalized −1..1 contract silently rescaled the SafetyChain clamp per device
+through a hardcoded rated-torque double conversion — found and removed in the
+2026-08-14 quality pass.)
+
+**Mixin count: one** (was zero until Phase 3 mount linking landed 2026-08-14).
+`WheelMountBlockEntityMixin` overrides two inputs with floats from a linked
+wheel: `computeYaw()D` at HEAD (the narrowest un-quantized steering point —
+bypasses the ±15 int, keeps Offroad's 0.4/tick chase lerp) and the
+`brakeStrength` local in `sable$physicsTick` via `@ModifyVariable` (one store
+covers the drag term and the `(1−brake)` drive cut; the published jar keeps
+its debug LVT so the name resolves). `defaultRequire = 0`: upstream drift
+means the mixin silently doesn't apply and every mount is stock — §10.4
+reports it. Everything else remains public API or plain game mechanics.
 
 ---
 
@@ -161,7 +180,18 @@ Each channel binds to a frequency item-pair ("same item twice", the typewriter i
 
 ### 5.5 Deferred extensions (decided, sequenced, not in this build)
 
-1. **Direct wheel-mount linking (Phase 3, the flagship upgrade).** A linker interaction: click the wheel, click each wheel mount — the link is stored as craft-local positions in the wheel BE. Linked mounts take their *steering signal* and *brake strength* as floats from the wheel instead of the redstone reads — the same native formulas at un-quantized resolution (steer: exact angle into the ±30° lock with per-mount invert; brake: float 0–1 into `(0.075 + b×0.3)`). **A resolution upgrade of existing inputs, not new physics.** Needs the first mixin (override the two signal reads in `WheelMountBlockEntity`); degrades to stock redstone behavior on upstream churn, health-checked per §10.4. Unlinked mounts stay 100 % stock forever — redstone remains supported.
+1. **Direct wheel-mount linking — IMPLEMENTED (2026-08-14, core).** The stick
+   is the linker: stick-click the wheel (session on), stick-click each mount
+   (toggle), stick-click the wheel (done); a stick therefore can't be used as
+   a frequency item. Links are stored as offsets from the wheel (translation-
+   safe across assembly; a rotated re-paste degrades that mount to stock).
+   Linked mounts take *steering yaw* and *brake strength* as floats through
+   the first mixin (§4) — the same native formulas at un-quantized resolution.
+   Unlinked mounts stay 100 % stock forever — redstone remains supported.
+   *Exit met: the `mount_linking_gives_float_steering` gametest A/Bs the same
+   mount unlinked (stock, yaw 0) then linked (chases 0.5·π/6 ≈ 0.2618 rad —
+   between the two reachable quantized values, provable float).* Still open
+   from the original scope: per-mount invert, brake bias, config screen.
 2. **Kinetic output (Phase 4).** A shaft socket + proportional-speed generator (`speed ∝ angle error`, capped ~128 RPM) for swivel-bearing planes; brings `ServoTorqueSource` FFB and the residual-lag sync-spring with it. Deliberately absent from v1 — cars don't need it.
 3. **Multi-station / persisted seat bindings.** The BE's seat/link storage is list-shaped so this is additive.
 4. **Config screen** replacing the placeholder flow (frequency ghost-slots per channel, lock/failsafe widgets, per-button toggle mode). Toggle-state persistence moves server-side only if client-side latching proves annoying.
@@ -256,7 +286,12 @@ Unchanged plan: `TorqueSourceProvider` (server), `FeelEffectProvider` (client, s
 ## 10. Configuration, tuning, project hygiene
 
 ### 10.1 Client config
-Device bindings per axis, FFB device, master gain, max torque Nm, update rate, feel gains, per-button toggle modes. (TOML + screen — Phase 3.)
+**Feel tuning: IMPLEMENTED (2026-08-14)** — every `FfbTuning` gain in
+`config/aeronautics_simwheel-feel.toml`, written with commented defaults on
+first run, hot-reloaded on save (mtime poll ~1 Hz), range-clamped on load;
+a SafetyChain-parameter edit re-ramps from zero (dip, never spike) and a parse
+error keeps the last good tuning. Device bindings per axis + the config
+screen remain Phase 3.
 
 ### 10.2 Per-block settings
 Steering lock and failsafe brake live **on the block** (NBT, survives disassembly) — they're craft properties, not client preferences. Craft profiles (gain trims etc.) stay client-side.
@@ -265,7 +300,13 @@ Steering lock and failsafe brake live **on the block** (NBT, survives disassembl
 Telemetry rate caps, max rigs, permission hook. (Phase 2a.)
 
 ### 10.4 Compatibility health check
-At startup, reflectively verify every §2 surface; failure ⇒ one loud line + per-surface feature disable + HUD badge. Never crash, never silently misbehave. (Required before public release; the surface list is currently small and mixin-free.)
+**IMPLEMENTED (2026-08-14)** — `HealthCheck.runAndLog()` at common setup
+verifies the method/field-level §2 reaches that survive classloading but can
+drift on upstream updates: the Sable actor callback signature, `logicalPose`,
+the two S8 reflective fields (via `fullFidelity()`), the mount state-read
+methods, the TIRE component and the link-network handler. One loud line per
+failure + a summary line; the S8 fields degrade in place as before. HUD badge
+still to come with the config screen.
 
 ### 10.5 Testing without a cockpit
 - `engine/` is pure-JVM unit tests (safety chain property tests, buffer, bridge codec fuzz, soft lock, driving-scenario regression).
@@ -285,9 +326,27 @@ Ours MIT (suggested); Sable PolyForm Shield (depend, never vendor); Simulated as
 
 **Phase 2b — cross-platform bridge sidecar. Software HALF DONE on BOTH platforms (2026-08-14): the Rust sidecar implements DirectInput on Windows and evdev on Linux, both conformance-tested** (`cargo test` + the cross-language `SidecarConformanceTest` against the real mod client — see §6.6). **Remaining: hardware-in-the-loop.** *Exit: the four §7 trip series in `sidecar/README.md` run green on a real R9, once per platform, with measured numbers committed.*
 
+**Done — the 2026-08-14 quality pass (M0–M3, full-codebase review driven).**
+The shipping FFB composition extracted into engine `FfbPipeline`/`FfbService`
+(the harness and the mod now run the same class; wiring + threading contract
+unit-tested); hardware angle at 250 Hz from bridge STATE (reviving the dead
+soft lock; damper/friction on true wheel velocity); Nm end-to-end through the
+HAL (the rated-torque double conversion removed); hot-reload feel TOML
+(§10.1); §10.4 health check implemented; sidecar SIGINT/SIGTERM clean-stop +
+strict integer arg parsing; bridge FLAG_FAULT → client panic wired; GLFW
+pedal-bind and demo-toggle fallback bugs fixed; per-sender input-packet rate
+gate; conformance test discovers the sidecar binary on all platforms; dead
+components deleted (ThrottleQuantizer, EngagementStateMachine, detent,
+client toggle-mode scaffolding). *Exit met: engine suite + cargo tests +
+cross-language conformance + all gametests green on macOS sim-mode.*
+
 **Phase 2c — end-to-end reactivity.** Curb strike < 150 ms to the rim, bump texture tracks block seams, dropout fade/recover — recorded traces. *Exit: traces committed.*
 
-**Phase 3 — mount linking + polish.** The linker (float steering/brake into native formulas, first mixin + health check), config screen, art pass, per-mount invert, brake bias. *Exit: A/B trace showing the ±15 → float steering upgrade on the race car.*
+**Phase 3 — mount linking + polish. CORE DONE (2026-08-14):** the linker
+(stick flow), float steering/brake into the native formulas via the first
+mixin (require-0 + §10.4 health check), A/B float-steering gametest green on
+the race car (§5.5). **Remaining:** config screen, art pass, per-mount
+invert, brake bias.
 
 **Phase 4 — kinetic output + planes.** Proportional-speed generator, `ServoTorqueSource`, residual-lag sync-spring, buffet. *Exit: §6.7 plane row demonstrated.*
 

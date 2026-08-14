@@ -165,6 +165,16 @@ public final class SimSteeringWheelBlock extends HorizontalDirectionalBlock
         if (stack.isEmpty() || player.isShiftKeyDown()) {
             return ItemInteractionResult.PASS_TO_DEFAULT_BLOCK_INTERACTION;
         }
+        // The stick is the linker tool (Phase 3): click the wheel to start a
+        // linking session, click each wheel mount, click the wheel to finish.
+        // Consequence, stated: a stick can't be used as a frequency item.
+        if (stack.is(net.minecraft.world.item.Items.STICK)) {
+            if (!level.isClientSide && level.getBlockEntity(pos) instanceof SimSteeringWheelBlockEntity be) {
+                player.displayClientMessage(Component.literal(
+                        MountLinkerInteraction.toggleSession(player, pos, be)), true);
+            }
+            return ItemInteractionResult.sidedSuccess(level.isClientSide);
+        }
         if (!level.isClientSide && level.getBlockEntity(pos) instanceof SimSteeringWheelBlockEntity be) {
             player.displayClientMessage(Component.literal(be.bindCursorChannel(stack)), true);
         }

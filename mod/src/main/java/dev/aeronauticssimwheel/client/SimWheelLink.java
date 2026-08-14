@@ -19,8 +19,9 @@ import net.neoforged.neoforge.network.PacketDistributor;
  * timeout stays fed. Leaving the seat releases control (the seat is the mutex).
  *
  * <p>Wheel buttons: device buttons 2–9 map to BTN_1..8 (0/1 are ENGAGE and
- * DETENT_MODIFIER). Per-button momentary/toggle modes are client-side; all
- * default to momentary until the config UI lands.
+ * DETENT_MODIFIER), all momentary — the receiving redstone decides latching,
+ * exactly like a lever vs. a button. (Client-side toggle modes were scaffolding
+ * with no UI to reach them; removed until the config screen actually lands.)
  */
 public final class SimWheelLink {
 
@@ -30,12 +31,6 @@ public final class SimWheelLink {
     private static final int BTN_COUNT = 8;
     /** A/D fallback steer: half lock — brisk but controllable at speed. */
     private static final float KEYBOARD_STEER = 0.5f;
-
-    /** Per-button toggle mode (client-side; config UI later). All momentary for now. */
-    private static final boolean[] TOGGLE_MODE = new boolean[BTN_COUNT];
-
-    private final boolean[] toggleState = new boolean[BTN_COUNT];
-    private final boolean[] lastRawButton = new boolean[BTN_COUNT];
 
     private BlockPos pos;
     private boolean engaged;
@@ -145,18 +140,7 @@ public final class SimWheelLink {
         }
         int mask = 0;
         for (int i = 0; i < BTN_COUNT; i++) {
-            boolean raw = device.button(FIRST_BTN_DEVICE_INDEX + i);
-            boolean bit;
-            if (TOGGLE_MODE[i]) {
-                if (raw && !lastRawButton[i]) {
-                    toggleState[i] = !toggleState[i];
-                }
-                bit = toggleState[i];
-            } else {
-                bit = raw;
-            }
-            lastRawButton[i] = raw;
-            if (bit) {
+            if (device.button(FIRST_BTN_DEVICE_INDEX + i)) {
                 mask |= 1 << i;
             }
         }

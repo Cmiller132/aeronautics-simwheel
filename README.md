@@ -99,6 +99,11 @@ dye ×2.
 - **Pedals/buttons**: bind each channel to a redstone-link frequency pair;
   put receivers wherever the signal is needed. Brakes: a receiver directly
   **above** each wheel mount is Offroad's native per-wheel brake input (0–15).
+- **Mount linking (recommended for cars)**: hold a **stick**, click the wheel
+  (linking on), click each wheel mount, click the wheel again (done). Linked
+  mounts take steering and brakes as exact **floats** from the wheel — same
+  physics, no 0–15 quantization; unlink any time the same way. (Because the
+  stick is the linker tool, it can't be used as a frequency item.)
 - **Settings on the block** (survive disassembly): steering lock
   ±180…1080°, failsafe brake level 0–15.
 
@@ -107,8 +112,9 @@ dye ×2.
 | Piece | State |
 |---|---|
 | Tire-force telemetry (server → your rim) | implemented + gametested — self-aligning torque, bump texture, contact strikes, all from the game's own wheel-mount math |
-| Client feel (soft lock, damper, friction, telemetry mix, safety chain) | implemented + unit-tested, runs on a 250 Hz thread |
-| Native output bridge (`sidecar/`, Rust — DirectInput on Windows, evdev on Linux) | implemented + conformance-tested on both platforms; **hardware-in-the-loop pending** — the [checklist](sidecar/README.md) needs a real R9 |
+| Client feel (soft lock, damper, friction, telemetry mix, safety chain) | implemented + unit-tested (`FfbPipeline` — the exact composition the offline harness regression-tests), 250 Hz thread with live hardware-angle input when the bridge runs |
+| Feel tuning | hot-reload TOML: `config/aeronautics_simwheel-feel.toml` (written with commented defaults on first run) — save the file, feel it next corner |
+| Native output bridge (`sidecar/`, Rust — DirectInput on Windows, evdev on Linux) | implemented + conformance-tested; **hardware-in-the-loop pending** — the [checklist](sidecar/README.md) needs a real R9 |
 
 **Safety, non-negotiable**: a 9 Nm direct-drive base can hurt you. The chain
 clamps at 2.5 Nm by default with ramp-in, slew limiting, watchdogs at every

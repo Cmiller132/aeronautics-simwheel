@@ -49,7 +49,7 @@ class BridgeWheelDeviceTest {
             device.ffbStart();
             await(() -> bridge.control.stream().anyMatch(f -> f instanceof Start), "START arrives");
 
-            device.ffbUpdateTorque(0.1f); // 0.1 × 9 Nm rated = 0.9 Nm
+            device.ffbUpdateTorque(0.9f); // Nm end-to-end: what you pass is what's on the wire
             await(() -> bridge.lastTorque() != null, "TORQUE arrives");
             Torque t = bridge.lastTorque();
             assertEquals(0.9f, t.torqueNm(), 0.001);
@@ -57,7 +57,7 @@ class BridgeWheelDeviceTest {
             assertEquals(100, t.watchdogMs());
 
             // Requests beyond the cap are clamped on the wire too, not just in SafetyChain
-            device.ffbUpdateTorque(1.0f); // would be 9 Nm
+            device.ffbUpdateTorque(9f);
             await(() -> bridge.torques.size() >= 2, "second TORQUE arrives");
             assertEquals(2.5f, bridge.lastTorque().torqueNm(), 0.001);
         }

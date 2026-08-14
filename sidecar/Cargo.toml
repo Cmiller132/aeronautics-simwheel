@@ -5,7 +5,9 @@ edition = "2021"
 description = "Native FFB bridge sidecar for Aeronautics SimWheel: speaks the AWFB UDP protocol, drives a PID wheelbase (MOZA R9 and friends) via DirectInput on Windows or evdev on Linux"
 license = "MIT"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# Unix-wide (not just Linux): the signal handler needs it on macOS too, where
+# the sidecar runs in --sim mode for the cross-language conformance tests.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies.windows]
@@ -20,6 +22,7 @@ features = [
     "Win32_Media",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_System_Console",
 ]
 
 [profile.release]

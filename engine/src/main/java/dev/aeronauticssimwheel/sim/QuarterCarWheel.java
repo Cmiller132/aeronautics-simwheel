@@ -74,4 +74,9 @@ public final class QuarterCarWheel {
     public double strikeN() {
         return strikeN;
     }
+
+    /** Suspension compression rate, m/s (positive = compressing) — the StrikeDetector's input. */
+    public double compressionRateMS() {
+        return v;
+    }
 }

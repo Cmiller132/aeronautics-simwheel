@@ -28,8 +28,15 @@ public interface WheelDevice {
     /** Create the single infinite constant-force effect at gain 0. Never recreated mid-session. */
     void ffbStart();
 
-    /** Update the constant-force effect in place. {@code normalized} is -1..1 of device max torque. */
-    void ffbUpdateTorque(float normalized);
+    /**
+     * Update the constant-force effect in place. Torque is in Nm at the rim —
+     * the same unit the whole ffb package works in — and each backend owns its
+     * final conversion and clamps (the bridge caps on the wire and again in
+     * the sidecar). Nm end-to-end keeps the SafetyChain clamp truthful on any
+     * wheelbase; a normalized fraction of "device max" would silently rescale
+     * it per device (that double conversion was a real bug).
+     */
+    void ffbUpdateTorque(float torqueNm);
 
     /** Stop and destroy the effect (device change / quit). */
     void ffbStop();

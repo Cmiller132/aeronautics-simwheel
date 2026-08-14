@@ -6,9 +6,11 @@ import java.util.List;
 
 /**
  * Scriptable fake device (DESIGN.md §10.5): tests set axes/buttons and inspect
- * every FFB call the engine made.
+ * every FFB call the engine made. Also scriptable as a {@link
+ * HardwareAngleSource} and {@link FaultingDevice} so the service's input
+ * selection and fault handling are testable.
  */
-public final class NullWheelDevice implements WheelDevice {
+public final class NullWheelDevice implements WheelDevice, HardwareAngleSource, FaultingDevice {
 
     private final float[] axes;
     private final boolean[] buttons;
@@ -18,6 +20,14 @@ public final class NullWheelDevice implements WheelDevice {
     public boolean ffbStarted;
     public boolean ffbStopped;
     public int panicCount;
+
+    // Scriptable live-state knobs for FfbService tests
+    public boolean hardwareAngleValid;
+    public float hardwareDeg;
+    public float hardwareVelDegPerS;
+    public boolean deviceFault;
+    /** When set, the next torque write throws it (then clears). */
+    public RuntimeException nextTorqueFailure;
 
     public NullWheelDevice(int axisCount, int buttonCount, EnumSet<Capability> capabilities) {
         this.axes = new float[axisCount];
@@ -68,8 +78,13 @@ public final class NullWheelDevice implements WheelDevice {
     }
 
     @Override
-    public void ffbUpdateTorque(float normalized) {
-        torqueWrites.add(normalized);
+    public void ffbUpdateTorque(float torqueNm) {
+        if (nextTorqueFailure != null) {
+            RuntimeException e = nextTorqueFailure;
+            nextTorqueFailure = null;
+            throw e;
+        }
+        torqueWrites.add(torqueNm);
     }
 
     @Override
@@ -81,5 +96,25 @@ public final class NullWheelDevice implements WheelDevice {
     public void panic() {
         panicCount++;
         torqueWrites.add(0f);
+    }
+
+    @Override
+    public boolean hardwareAngleValid() {
+        return hardwareAngleValid;
+    }
+
+    @Override
+    public float hardwareDeg() {
+        return hardwareDeg;
+    }
+
+    @Override
+    public float hardwareVelDegPerS() {
+        return hardwareVelDegPerS;
+    }
+
+    @Override
+    public boolean deviceFault() {
+        return deviceFault;
     }
 }

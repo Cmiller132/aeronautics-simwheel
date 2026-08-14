@@ -25,6 +25,7 @@ public final class SimWheelClient {
     private static WheelInput input;
     private static SimWheelLink link;
     private static FfbController ffb;
+    private static FeelConfig feel;
 
     /** -Dsimwheel.selftest=N: log input/FFB state and quit after N client ticks. */
     private static final int SELFTEST_TICKS = Integer.getInteger("simwheel.selftest", 0);
@@ -42,6 +43,8 @@ public final class SimWheelClient {
         input = new WheelInput();
         link = new SimWheelLink();
         ffb = new FfbController();
+        feel = new FeelConfig(ffb);
+        feel.init();
 
         modBus.addListener((RegisterKeyMappingsEvent e) -> {
             e.register(KEY_ENGAGE);
@@ -49,7 +52,7 @@ public final class SimWheelClient {
         });
         modBus.addListener((RegisterGuiLayersEvent e) -> e.registerAboveAll(
                 ResourceLocation.fromNamespaceAndPath(AeronauticsSimwheel.MOD_ID, "hud"),
-                new SimWheelHud(input, link, ffb)));
+                new SimWheelHud(input, link, ffb, feel)));
 
         NeoForge.EVENT_BUS.addListener(SimWheelClient::onClientTick);
         NeoForge.EVENT_BUS.addListener((ClientPlayerNetworkEvent.LoggingOut e) -> {
@@ -64,6 +67,7 @@ public final class SimWheelClient {
 
     private static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
+        feel.tick();
         input.tick(link.isEngaged());
 
         while (KEY_DEMO.consumeClick()) {

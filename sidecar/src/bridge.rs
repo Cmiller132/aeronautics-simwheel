@@ -219,7 +219,6 @@ impl<D: FfbDevice> Bridge<D> {
     }
 
     /// Discard everything queued on the socket without interpreting it.
-    /// Returns how many datagrams were dropped.
     /// Returns (datagrams dropped, queue CONFIRMED empty). "Confirmed" means
     /// the loop ended because a receive would have blocked — the only proof
     /// that nothing from before the connection change is still waiting.

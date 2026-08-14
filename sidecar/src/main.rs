@@ -29,7 +29,13 @@ mod evdev;
 use bridge::{Bridge, Tick, DEFAULT_MAX_TORQUE_NM, STATE_HZ};
 use device::FfbDevice;
 use std::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// Cleared by SIGINT/SIGTERM (or Ctrl-C on Windows) so the main loop exits and
+/// the device Drop impls run (stop + effect erase) — without this, the only
+/// thing between a Ctrl-C and residual torque was the 250 ms hardware lease.
+static RUNNING: AtomicBool = AtomicBool::new(true);
 
 struct Args {
     list: bool,
@@ -67,8 +73,22 @@ fn parse_args() -> Args {
         match a.as_str() {
             "--list" => args.list = true,
             "--sim" => args.sim = true,
-            "--device" => args.device_index = num("--device") as usize,
-            "--port" => args.port = num("--port") as u16,
+            // Integers parse as integers: the old f64-then-cast path silently
+            // saturated (--port 99999 → 65535, --device -1 → 0) instead of
+            // erroring like every other refused-nonsense flag below.
+            "--device" => {
+                args.device_index = it
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or_else(|| die("--device needs a non-negative integer"));
+            }
+            "--port" => {
+                args.port = it
+                    .next()
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .filter(|p| *p != 0)
+                    .unwrap_or_else(|| die("--port needs an integer in 1..=65535"));
+            }
             "--max-torque" => args.max_torque_nm = num("--max-torque") as f32,
             "--range" => args.range_deg = num("--range") as f32,
             "--rated-torque" => args.rated_torque_nm = Some(num("--rated-torque") as f32),
@@ -185,10 +205,11 @@ fn main() {
 }
 
 fn run<D: FfbDevice>(mut bridge: Bridge<D>) {
+    install_signal_handlers();
     let sleeper = Sleeper::new();
     let period = Duration::from_secs_f64(1.0 / STATE_HZ);
     let mut prev = Instant::now();
-    loop {
+    while RUNNING.load(Ordering::Relaxed) {
         let now = Instant::now();
         let dt = now.duration_since(prev).as_secs_f64().min(0.1);
         prev = now;
@@ -198,7 +219,40 @@ fn run<D: FfbDevice>(mut bridge: Bridge<D>) {
             sleeper.sleep(period - elapsed);
         }
     }
+    eprintln!("[bridge] shutdown signal — stopping output");
+    drop(bridge); // device Drop runs: stop + effect erase, not just the lease
 }
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    // Async-signal-safe: the handler only stores an atomic.
+    unsafe extern "C" fn on_signal(_sig: libc::c_int) {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(windows)]
+fn install_signal_handlers() {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::System::Console::SetConsoleCtrlHandler;
+    // Ctrl-C / Ctrl-Break: returning TRUE claims the event and the loop exits
+    // cleanly within one 4 ms period. Window-close still hard-kills after the
+    // handler returns — that path stays covered by the 250 ms effect lease.
+    unsafe extern "system" fn on_ctrl(_event: u32) -> BOOL {
+        RUNNING.store(false, Ordering::SeqCst);
+        BOOL(1)
+    }
+    unsafe {
+        let _ = SetConsoleCtrlHandler(Some(on_ctrl), true);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn install_signal_handlers() {}
 
 /// Sub-millisecond sleep on Windows. Plain `thread::sleep` rounds to the
 /// ~15.6 ms timer quantum (turning 250 Hz into ~64 Hz), and Windows 11 may

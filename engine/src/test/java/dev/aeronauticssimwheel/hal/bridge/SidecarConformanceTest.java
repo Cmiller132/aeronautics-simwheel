@@ -36,10 +36,18 @@ class SidecarConformanceTest {
         if (prop != null) {
             return Path.of(prop);
         }
-        // engine/ is the test working dir; the crate lives beside it.
+        // engine/ is the test working dir; the crate lives beside it. Cargo
+        // names the binary `simwheel-bridge.exe` on Windows and plain
+        // `simwheel-bridge` elsewhere — probing only .exe silently skipped
+        // the whole conformance suite on Linux/macOS (found by review); the
+        // target-linux dir is the documented WSL/cross build location.
         return Stream.of(
-                        Path.of("../sidecar/target/release/simwheel-bridge.exe"),
-                        Path.of("../sidecar/target/debug/simwheel-bridge.exe"))
+                        "../sidecar/target/release/simwheel-bridge.exe",
+                        "../sidecar/target/release/simwheel-bridge",
+                        "../sidecar/target/debug/simwheel-bridge.exe",
+                        "../sidecar/target/debug/simwheel-bridge",
+                        "../sidecar/target-linux/release/simwheel-bridge")
+                .map(Path::of)
                 .filter(Files::exists)
                 .findFirst()
                 .orElse(null);
@@ -101,7 +109,7 @@ class SidecarConformanceTest {
         float start = device.steeringDeg();
         long until = System.currentTimeMillis() + 2000;
         while (System.currentTimeMillis() < until) {
-            device.ffbUpdateTorque(0.25f); // 2.25 Nm of 9 rated, inside the 2.5 cap
+            device.ffbUpdateTorque(2.25f); // Nm on the wire, inside the 2.5 cap
             Thread.sleep(10);
         }
         float deflected = device.steeringDeg();
@@ -135,7 +143,7 @@ class SidecarConformanceTest {
         float before = device.steeringDeg();
         until = System.currentTimeMillis() + 800;
         while (System.currentTimeMillis() < until) {
-            device.ffbUpdateTorque(0.25f);
+            device.ffbUpdateTorque(2.25f);
             Thread.sleep(10);
         }
         assertTrue(device.steeringDeg() - before > 5f,

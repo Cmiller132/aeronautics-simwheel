@@ -21,12 +21,16 @@ public final class GlfwWheelDevice implements WheelDevice {
     private volatile float[] axes = new float[0];
     private volatile boolean[] buttons = new boolean[0];
 
+    /** Render-thread only (constructor polls GLFW). */
     public GlfwWheelDevice(int jid) {
         this.jid = jid;
         String guid = GLFW.glfwGetJoystickGUID(jid);
         String name = GLFW.glfwGetJoystickName(jid);
-        FloatBuffer a = GLFW.glfwGetJoystickAxes(jid);
-        this.id = guid + "/" + name + "/" + (a == null ? 0 : a.remaining());
+        // Populate axes/buttons NOW: WheelAdapter.autoBind reads axisCount()
+        // immediately after construction, and empty arrays here meant pedals
+        // never bound until a device replug (found by review).
+        poll();
+        this.id = guid + "/" + name + "/" + axes.length;
     }
 
     /** Render-thread only. Snapshots axes and buttons for the other threads. */
@@ -84,7 +88,7 @@ public final class GlfwWheelDevice implements WheelDevice {
     }
 
     @Override
-    public void ffbUpdateTorque(float normalized) {
+    public void ffbUpdateTorque(float torqueNm) {
         throw new UnsupportedOperationException("GLFW backend is input-only");
     }
 

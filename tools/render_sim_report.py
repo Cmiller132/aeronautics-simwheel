@@ -20,30 +20,32 @@ with IN.open() as f:
 def series(rows, key, step=1):
     return [round(r[key], 3) for r in rows[::step]]
 
-main = {  # every 5th row of the 500 Hz trace -> 100 Hz
-    "t": series(rows, "t", 5),
-    "rim": series(rows, "outNm", 5),
-    "telem": series(rows, "telemetryNm", 5),
-    "raw": series(rows, "rawNm", 5),
+main = {  # every 2nd row of the 250 Hz trace -> 125 Hz
+    "t": series(rows, "t", 2),
+    "rim": series(rows, "outNm", 2),
+    "telem": series(rows, "telemetryNm", 2),
+    "raw": series(rows, "rawNm", 2),
 }
 curb_rows = [r for r in rows if 10.30 <= r["t"] <= 11.10]
 curb = {
     "t": series(curb_rows, "t"),
     "raw": series(curb_rows, "rawNm"),
     "telem": series(curb_rows, "telemetryNm"),
+    "imp": series(curb_rows, "impulseNm"),
     "rim": series(curb_rows, "outNm"),
 }
-steer = {
-    "t": series(rows, "t", 10),
-    "cmd": series(rows, "steerCmdDeg", 10),
-    "virt": series(rows, "virtualDeg", 10),
+lock_rows = [r for r in rows if 24.0 <= r["t"]]
+lock = {
+    "t": series(lock_rows, "t"),
+    "cmd": series(lock_rows, "steerCmdDeg"),
+    "rim": series(lock_rows, "outNm"),
 }
 
 PHASES = [(0, 5, "A smooth weave"), (5, 10, "B bumpy blocks"), (10, 12, "C curb"),
           (12, 17, "D corner"), (17, 18, "E dropout"), (18, 19, "E'"),
-          (19, 24, "F recovery")]
+          (19, 24, "F recovery"), (24, 26, "G soft lock")]
 
-data = json.dumps({"main": main, "curb": curb, "steer": steer, "phases": PHASES},
+data = json.dumps({"main": main, "curb": curb, "lock": lock, "phases": PHASES},
                   separators=(",", ":"))
 
 html = """<!doctype html>
@@ -99,9 +101,11 @@ svg{display:block;width:100%;height:auto}
 </style></head>
 <body><div class="viz-root"><div class="wrap">
 <h1>How the FFB actually behaves — race car, 15&thinsp;m/s over block terrain</h1>
-<p class="sub">Headless run of the real pipeline (TelemetryBuffer → predictor → sync-spring → mixer → safety chain)
-fed by a quarter-car stand-in at 60&thinsp;Hz substeps, 20&thinsp;Hz packets, 1&thinsp;kHz client loop, 150&thinsp;Hz device writes.
-Clamp 2.5&thinsp;Nm. Phases: smooth weave · bumpy blocks · curb strike · steady corner · telemetry dropout · recovery.</p>
+<p class="sub">Headless run of the SHIPPING composition (FfbPipeline: TelemetryBuffer + soft lock + damper/friction
++ event impulses → soft-knee mixer → safety chain) fed by a quarter-car stand-in at 60&thinsp;Hz substeps,
+20&thinsp;Hz packets + immediate strike events, 250&thinsp;Hz client loop. Direct steering authority — no predictor,
+no sync-spring. Clamp 2.5&thinsp;Nm. Phases: smooth weave · bumpy blocks · curb strike · steady corner ·
+telemetry dropout · recovery · into the soft lock.</p>
 <div id="charts"></div>
 </div></div>
 <div class="tip" id="tip"></div>
@@ -199,18 +203,18 @@ card('Raw hinge torque at the axle (server-side truth, own scale)',
    series:[{n:'raw',v:D.main.raw,c:'--s-raw'}]}));
 
 card('Curb strike, zoomed (10.3–11.1 s)',
- 'Raw spike → packeted at the next tick → 75 ms interpolation delay → soft knee + clamp + slew at the rim. Measured rim peak lag ≈ 116 ms (the FfbEventPacket path will cut most of the batching share of that).',
- [{n:'raw',c:'--s-raw'},{n:'telemetry',c:'--s-telem'},{n:'rim output',c:'--s-rim'}],
+ 'Two paths race to the rim: the strike fires an immediate event impulse (ms), while the sustained torque rides the 20 Hz batch through the 75 ms interpolation delay — then soft knee + clamp + slew.',
+ [{n:'raw',c:'--s-raw'},{n:'telemetry',c:'--s-telem'},{n:'event impulse',c:'--s-cmd'},{n:'rim output',c:'--s-rim'}],
  chart({t:D.curb.t,dom:[-6,50],ticks:[0,25,50],unit:'Nm',
-   marks:[{t:10.451,c:'--s-raw',label:'raw peak'},{t:10.567,c:'--s-rim',label:'rim peak'}],
    series:[{n:'raw',v:D.curb.raw,c:'--s-raw'},{n:'telemetry',v:D.curb.telem,c:'--s-telem'},
-           {n:'rim output',v:D.curb.rim,c:'--s-rim'}]}));
+           {n:'impulse',v:D.curb.imp,c:'--s-cmd'},{n:'rim output',v:D.curb.rim,c:'--s-rim'}]}));
 
-card('Hardware command vs virtual (in-game) wheel',
- 'The kinetic wheel chases the command at 96°/s — the sync-spring renders that gap as resistance. During the corner wind-in (12–13 s) the virtual wheel visibly lags the command.',
- [{n:'hardware command',c:'--s-cmd'},{n:'virtual wheel (predicted)',c:'--s-virt'}],
- chart({t:D.steer.t,dom:[-30,100],ticks:[0,45,90],phases:1,unit:'°',h:200,
-   series:[{n:'command',v:D.steer.cmd,c:'--s-cmd'},{n:'virtual',v:D.steer.virt,c:'--s-virt'}]}));
+card('Into the soft lock (24–26 s)',
+ 'The wheel is physically shoved 40° past the block\\'s ±450° range. The stop torque saturates the safety clamp — a wall at whatever ceiling the user allows, exactly the standard sim-racing behavior.',
+ [{n:'hardware angle (°/100)',c:'--s-cmd'},{n:'rim output (Nm)',c:'--s-rim'}],
+ chart({t:D.lock.t,dom:[-5,5],ticks:[-2.5,0,2.5],clamp:2.5,unit:'',
+   series:[{n:'angle °/100',v:D.lock.cmd.map(v=>v/100),c:'--s-cmd'},
+           {n:'rim Nm',v:D.lock.rim,c:'--s-rim'}]}));
 </script></body></html>
 """
 

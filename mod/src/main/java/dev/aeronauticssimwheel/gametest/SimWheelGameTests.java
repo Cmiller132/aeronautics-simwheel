@@ -332,6 +332,62 @@ public class SimWheelGameTests {
         });
     }
 
+    /**
+     * Phase 3 exit gate (DESIGN.md §5.5): linking a mount to the wheel must
+     * upgrade its steering from the quantized ±15 redstone read to the exact
+     * float — the A/B is on the same mount, unlinked then linked. Steering 0.5
+     * is chosen because no integer signal can produce it: the float target
+     * −(0.5)·π/6 ≈ 0.2618 sits exactly between signal 7 (0.2443) and signal 8
+     * (0.2793), so a tight tolerance proves the un-quantized path.
+     */
+    @GameTest(template = "race_car", timeoutTicks = 400)
+    @PrefixGameTestTemplate(false)
+    public static void mount_linking_gives_float_steering(GameTestHelper helper) {
+        SimSteeringWheelBlockEntity wheel =
+                findBlockEntity(helper, SimSteeringWheelBlockEntity.class, 9, 4, 5);
+        BlockPos mountRel = findBlockEntityPos(helper,
+                dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlockEntity.class, 9, 4, 5);
+        var mount = (dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlockEntity)
+                helper.getLevel().getBlockEntity(helper.absolutePos(mountRel));
+        UUID driver = UUID.randomUUID();
+
+        // Keep the driver latch fed at half right steer for the whole test.
+        for (int tick = 5; tick <= 90; tick += 5) {
+            helper.runAtTickTime(tick, () ->
+                    wheel.applyInput(driver, null, 0.5f, 0f, 0f, 0f, 0));
+        }
+
+        // A: unlinked, and the wheel's STEER channels unbound — the mount sees
+        // no signal at all, so its yaw must stay at zero (stock behavior).
+        helper.runAtTickTime(30, () -> helper.assertTrue(
+                Math.abs(readChasingYaw(mount)) < 1e-4,
+                "unlinked mount must stay stock (yaw 0), got " + readChasingYaw(mount)));
+
+        // B: link it — the mixin now feeds the exact float yaw.
+        helper.runAtTickTime(32, () ->
+                wheel.toggleMountLink(helper.absolutePos(mountRel)));
+
+        helper.runAtTickTime(85, () -> {
+            double yaw = Math.abs(readChasingYaw(mount));
+            double expected = 0.5 * Math.PI / 6.0; // 0.26180 — unreachable by any int signal
+            helper.assertTrue(Math.abs(yaw - expected) < 0.009,
+                    "linked mount must chase the FLOAT yaw " + expected
+                            + " (quantized would be 0.24435 or 0.27925), got " + yaw);
+            helper.succeed();
+        });
+    }
+
+    private static double readChasingYaw(Object mount) {
+        try {
+            var f = dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlockEntity.class
+                    .getDeclaredField("chasingYaw");
+            f.setAccessible(true);
+            return f.getDouble(mount);
+        } catch (ReflectiveOperationException e) {
+            throw new GameTestAssertException("chasingYaw not reachable: " + e);
+        }
+    }
+
     private static void assertSignal(GameTestHelper helper, BlockPos absPos, Direction queryDir,
                                      int expected, String what) {
         int actual = helper.getLevel().getSignal(absPos, queryDir);

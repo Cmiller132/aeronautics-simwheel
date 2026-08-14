@@ -2,7 +2,9 @@ plugins {
     id 'net.neoforged.moddev' version '2.0.143'
 }
 
-version = '0.2.0'
+// Single source of truth for the version: gradle.properties `mod_version`
+// (neoforge.mods.toml still pins its own copy — keep the two in sync).
+version = project.property('mod_version')
 base { archivesName = 'aeronautics-simwheel' }
 
 java {

@@ -1,6 +1,8 @@
 package dev.aeronauticssimwheel.hal.bridge;
 
 import dev.aeronauticssimwheel.hal.Capability;
+import dev.aeronauticssimwheel.hal.FaultingDevice;
+import dev.aeronauticssimwheel.hal.HardwareAngleSource;
 import dev.aeronauticssimwheel.hal.WheelDevice;
 import dev.aeronauticssimwheel.hal.bridge.BridgeProtocol.Frame;
 import dev.aeronauticssimwheel.hal.bridge.BridgeProtocol.Hello;
@@ -27,7 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Thread-safe: a daemon receiver thread owns the socket reads; the FFB
  * thread calls {@link #ffbUpdateTorque}; the game thread reads axes.
  */
-public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
+public final class BridgeWheelDevice
+        implements WheelDevice, HardwareAngleSource, FaultingDevice, AutoCloseable {
 
     public record Config(float rotationRangeDeg, float maxTorqueCapNm, int bridgeWatchdogMs,
                          long staleAfterNanos) {
@@ -103,7 +106,12 @@ public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
                             lastStateNanos = System.nanoTime();
                         }
                         case Hello h -> {
-                            ratedTorqueNm = h.ratedTorqueNm();
+                            // Peer data: a NaN/absurd rated torque must never
+                            // enter any arithmetic — keep the previous value.
+                            float rated = h.ratedTorqueNm();
+                            if (Float.isFinite(rated) && rated >= 0.5f && rated <= 30f) {
+                                ratedTorqueNm = rated;
+                            }
                             deviceName = h.deviceName();
                         }
                         default -> {
@@ -144,8 +152,32 @@ public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
         return steeringVelDegPerS;
     }
 
+    /** Rated torque from HELLO — informational (HUD); torque math is Nm end-to-end. */
     public float ratedTorqueNm() {
         return ratedTorqueNm;
+    }
+
+    // --- HardwareAngleSource: the STATE stream IS the physical wheel at ~250 Hz ---
+
+    @Override
+    public boolean hardwareAngleValid() {
+        return connected();
+    }
+
+    @Override
+    public float hardwareDeg() {
+        return steeringDeg;
+    }
+
+    @Override
+    public float hardwareVelDegPerS() {
+        return steeringVelDegPerS;
+    }
+
+    /** Sidecar-reported output fault (STATE FLAG_FAULT), only while the stream is live. */
+    @Override
+    public boolean deviceFault() {
+        return connected() && (flags & BridgeProtocol.FLAG_FAULT) != 0;
     }
 
     @Override
@@ -185,18 +217,16 @@ public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
     }
 
     /**
-     * @param normalized torque in [-1, 1] of the device's rated torque —
-     *                   converted to Nm on the wire, clamped by our cap and,
-     *                   independently, by the bridge programming the base.
+     * @param torqueNm torque in Nm at the rim — clamped by our cap here and,
+     *                 independently, by the bridge programming the base.
      */
     @Override
-    public void ffbUpdateTorque(float normalized) {
-        if (panicLatched || !Float.isFinite(normalized)) {
+    public void ffbUpdateTorque(float torqueNm) {
+        if (panicLatched || !Float.isFinite(torqueNm)) {
             return; // ±Inf would clamp into a constant full-cap command
         }
-        float nm = normalized * ratedTorqueNm;
         float cap = cfg.maxTorqueCapNm();
-        nm = Math.max(-cap, Math.min(cap, nm));
+        float nm = Math.clamp(torqueNm, -cap, cap);
         send(new BridgeProtocol.Torque(sequence.incrementAndGet(), nm, cap, cfg.bridgeWatchdogMs()));
     }
 

@@ -8,8 +8,8 @@ import java.util.EnumSet;
 /**
  * Hardware-free stand-in for a wheel: axis 0 sweeps a slow sine so the whole
  * input → packet → FFB path can be exercised in-game with no device attached
- * (toggled with the demo keybind). Accepts torque writes and records the last
- * value so the HUD can show what a real base would be commanded to do.
+ * (toggled with the demo keybind). Accepts torque writes like a real base
+ * would (the HUD's FFB line shows the commanded Nm).
  */
 public final class DemoWheelDevice implements WheelDevice {
 
@@ -58,9 +58,9 @@ public final class DemoWheelDevice implements WheelDevice {
     }
 
     @Override
-    public void ffbUpdateTorque(float normalized) {
+    public void ffbUpdateTorque(float torqueNm) {
         if (ffbActive) {
-            lastTorque = normalized;
+            lastTorque = torqueNm;
         }
     }
 
@@ -74,9 +74,5 @@ public final class DemoWheelDevice implements WheelDevice {
     public void panic() {
         ffbActive = false;
         lastTorque = 0f;
-    }
-
-    public float lastTorqueNormalized() {
-        return lastTorque;
     }
 }

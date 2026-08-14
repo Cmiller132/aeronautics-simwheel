@@ -9,6 +9,7 @@ import dev.aeronauticssimwheel.network.SimWheelInputPacket;
 import dev.aeronauticssimwheel.registry.SimWheelRegistry;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.event.RegisterGameTestsEvent;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
@@ -36,6 +37,9 @@ public final class AeronauticsSimwheel {
                         FfbTelemetryPacket::handle)
                 .playToClient(FfbEventPacket.TYPE, FfbEventPacket.CODEC,
                         FfbEventPacket::handle));
+        modEventBus.addListener((FMLCommonSetupEvent e) -> HealthCheck.runAndLog());
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(
+                dev.aeronauticssimwheel.content.MountLinkerInteraction::onRightClickBlock);
         if (FMLEnvironment.dist.isClient()) {
             SimWheelClient.init(modEventBus);
         }

@@ -26,7 +26,9 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -81,6 +83,17 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     private float lockDeg = DEFAULT_LOCK_DEG;
     private int failsafeBrake;
 
+    /**
+     * Phase 3 mount links, stored as offsets from this block (translation-
+     * safe across assembly/disassembly; a rotated re-paste that breaks an
+     * offset silently degrades that mount to stock redstone).
+     */
+    private final Set<BlockPos> linkedMountOffsets = new HashSet<>();
+    /** What's currently registered in {@link MountLinks}, for clean swaps. */
+    private Set<BlockPos> registeredMounts = Set.of();
+    /** Live brake pedal 0..1 (failsafe/15 after neutralize) for linked mounts. */
+    private float brakeFloat;
+
     /** Last values pushed to redstone neighbors / clients, for change detection. */
     private int lastEmittedSteer = Integer.MIN_VALUE;
     private boolean lastEmittedEngaged;
@@ -125,6 +138,7 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         lastInputGameTime = level.getGameTime();
 
         targetDeg = Mth.clamp(steering, -1f, 1f) * lockDeg;
+        brakeFloat = Mth.clamp(brake, 0f, 1f);
 
         float s = Mth.clamp(steering, -1f, 1f);
         setLevel(SimChannel.STEER_LEFT, s < 0 ? quantize(-s) : 0);
@@ -148,6 +162,7 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         user = null;
         seatPos = null;
         targetDeg = 0f;
+        brakeFloat = failsafeBrake / 15f; // linked mounts get the same dead-man's brake
         for (SimChannel ch : SimChannel.values()) {
             setLevel(ch, ch == SimChannel.BRAKE ? failsafeBrake : 0);
         }
@@ -271,6 +286,75 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     }
 
     // ------------------------------------------------------------------
+    // Phase 3 mount linking (DESIGN.md §5.5): float steering/brake straight
+    // into linked wheel mounts via the WheelMountBlockEntityMixin.
+    // ------------------------------------------------------------------
+
+    /** Toggle a mount link (linker tool / gametests). @return true when now linked. */
+    public boolean toggleMountLink(BlockPos mountPos) {
+        BlockPos offset = mountPos.subtract(worldPosition);
+        boolean nowLinked = !linkedMountOffsets.remove(offset) && linkedMountOffsets.add(offset);
+        refreshMountRegistration();
+        setChanged();
+        if (level != null && !level.isClientSide) {
+            level.sendBlockUpdated(worldPosition, getBlockState(), getBlockState(), 3);
+        }
+        return nowLinked;
+    }
+
+    public int linkedMountCount() {
+        return linkedMountOffsets.size();
+    }
+
+    /**
+     * The float analog of Offroad's {@code computeYaw(signal)} — the exact
+     * continuous version of the redstone chain this block otherwise feeds:
+     * emitted signed steer (with the stock east/south facing flip) mapped as
+     * −(s/15)·(π/4)·(2/3) into the mount's ±30° lock. Mirrors the redstone
+     * deadband so a linked and an unlinked mount agree at center.
+     */
+    public double linkedSteerYawRad() {
+        if (Math.abs(angleDeg) < 0.99f) {
+            return 0.0;
+        }
+        float frac = Mth.clamp(angleDeg / lockDeg, -1f, 1f);
+        Direction facing = getBlockState().getValue(SimSteeringWheelBlock.FACING);
+        int flip = (facing.getStepX() == 1 || facing.getStepZ() == 1) ? -1 : 1;
+        return -(frac * flip) * (Math.PI / 4.0) * (2.0 / 3.0);
+    }
+
+    /** Live brake 0..1 for linked mounts (failsafe/15 after neutralize). */
+    public float linkedBrake01() {
+        return brakeFloat;
+    }
+
+    /** (Re)register this wheel's links in the mount→wheel index, both sides. */
+    private void refreshMountRegistration() {
+        if (level == null) {
+            return;
+        }
+        Set<BlockPos> mounts = new HashSet<>();
+        for (BlockPos offset : linkedMountOffsets) {
+            mounts.add(worldPosition.offset(offset));
+        }
+        MountLinks.replaceAll(level, worldPosition, registeredMounts, mounts);
+        registeredMounts = mounts;
+    }
+
+    private void unregisterMountLinks() {
+        if (level != null && !registeredMounts.isEmpty()) {
+            MountLinks.replaceAll(level, worldPosition, registeredMounts, Set.of());
+            registeredMounts = Set.of();
+        }
+    }
+
+    @Override
+    public void onLoad() {
+        super.onLoad();
+        refreshMountRegistration();
+    }
+
+    // ------------------------------------------------------------------
     // Link channels
     // ------------------------------------------------------------------
 
@@ -368,12 +452,14 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     @Override
     public void setRemoved() {
         releaseNetwork();
+        unregisterMountLinks();
         super.setRemoved();
     }
 
     @Override
     public void onChunkUnloaded() {
         releaseNetwork();
+        unregisterMountLinks();
         super.onChunkUnloaded();
     }
 
@@ -396,6 +482,8 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         tag.put("Bindings", bindings);
         tag.putFloat("LockDeg", lockDeg);
         tag.putInt("FailsafeBrake", failsafeBrake);
+        tag.putLongArray("LinkedMounts",
+                linkedMountOffsets.stream().mapToLong(BlockPos::asLong).toArray());
     }
 
     @Override
@@ -416,6 +504,15 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         if (tag.contains("FailsafeBrake")) {
             failsafeBrake = tag.getInt("FailsafeBrake");
         }
+        if (tag.contains("LinkedMounts")) {
+            linkedMountOffsets.clear();
+            for (long packed : tag.getLongArray("LinkedMounts")) {
+                linkedMountOffsets.add(BlockPos.of(packed));
+            }
+            if (level != null) {
+                refreshMountRegistration(); // client update-tag path; server load → onLoad
+            }
+        }
         // Client sync payload (update tag only — never persisted)
         if (tag.contains("Angle")) {
             angleDeg = tag.getFloat("Angle");
@@ -429,6 +526,8 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         tag.putFloat("Angle", angleDeg);
         tag.putFloat("LockDeg", lockDeg);
         tag.putInt("FailsafeBrake", failsafeBrake);
+        tag.putLongArray("LinkedMounts",
+                linkedMountOffsets.stream().mapToLong(BlockPos::asLong).toArray());
         return tag;
     }
 

@@ -119,8 +119,12 @@ public final class WheelInput {
             AeronauticsSimwheel.LOGGER.info("SimWheel demo input ON");
         } else {
             demo = null;
-            adapter = null;
             bridgeActive = false; // re-detect naturally next tick
+            rescanCooldown = 0;
+            // Fall straight back to a still-present joystick — leaving the
+            // adapter null here stranded input on the keyboard until a replug,
+            // because the rescan guard only fires when no joystick is present.
+            adapter = glfw != null && glfw.present() ? WheelAdapter.autoBind(glfw) : null;
             AeronauticsSimwheel.LOGGER.info("SimWheel demo input OFF");
         }
     }
