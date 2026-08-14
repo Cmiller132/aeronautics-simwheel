@@ -28,7 +28,7 @@ If the structure templates are stale (e.g. `control_rig.nbt` still contains the 
 - `./gradlew :mod:runClient` — full dev client with the whole mod stack. Place a `sim_steering_wheel` on a craft, sit in a seat, look at it and press **J**; **K** toggles a hardware-free sine-sweep demo input; the debug HUD shows device, commanded vs. in-game angle, lock, and safety-chain torque.
 - `./gradlew :mod:runClientSelftest` — same client, logs SimWheel input/FFB state and quits by itself (CI-ish smoke test).
 
-No FFB hardware output yet (GLFW is input-only; the MOZA bridge sidecar is Phase 2b) — torque is computed through the real pipeline (soft lock + damper/friction through the safety chain on a 250 Hz thread) and shown on the HUD.
+FFB hardware output goes through the **native bridge sidecar** ([`sidecar/`](sidecar/README.md), Rust + DirectInput — the R9 needs no vendor SDK): `cd sidecar && cargo build --release`, run `simwheel-bridge`, and the mod's bridge device takes over from GLFW. Without the sidecar (or hardware), torque is still computed through the real pipeline (telemetry + soft lock + damper/friction through the safety chain on a 250 Hz thread) and shown on the HUD. The sidecar's hardware trip checklist (`sidecar/README.md`) gates real-wheel use.
 
 ## How a car is wired (all existing Offroad mechanics, nothing custom)
 
@@ -53,11 +53,11 @@ Drive (and later fly) Simulated-Project vehicles with a real wheel and pedals: a
 | Against | Create 6.x + Create: Simulated / Aeronautics / Offroad 1.3.x (MIT code) |
 | Physics API | [Sable](https://github.com/ryanhcode/sable) `dev.ryanhcode.sable.api.*` (Maven: `maven.ryanhcode.dev`) |
 | Input | GLFW joystick API (already in Minecraft's LWJGL); MOZA bridge sidecar later |
-| FFB output | MOZA SDK bridge sidecar over localhost UDP (protocol implemented + unit-tested in `engine/`), SDL3 sidecar variant later |
+| FFB output | Native Rust/DirectInput bridge sidecar over localhost UDP ([`sidecar/`](sidecar/README.md) — no vendor SDK; the R9 is a standard PID device), SDL3 variant later for exotic wheels |
 
 ## Roadmap
 
-See [`docs/DESIGN.md` §11](docs/DESIGN.md) for phases with exit criteria. In short: **done** — the block (gametested) and **2a** tire-force telemetry (wheel-mount sampler → substep torque packets → client reconstruction, gametested end to end); **next: 2b** — MOZA bridge on hardware; **2c** — end-to-end reactivity + cue scalars; **3** — direct wheel-mount linking (float steering/brake into the native formulas), art pass, config screen; **4** — kinetic output + swivel-bearing planes; **5** — public release.
+See [`docs/DESIGN.md` §11](docs/DESIGN.md) for phases with exit criteria. In short: **done** — the block (gametested), **2a** tire-force telemetry (wheel-mount sampler → substep torque packets → client reconstruction, gametested end to end), and the **2b sidecar software** (Rust/DirectInput, cross-language conformance-tested); **next:** 2b hardware-in-the-loop on the R9 (checklist in [`sidecar/README.md`](sidecar/README.md)); **2c** — end-to-end reactivity + cue scalars; **3** — direct wheel-mount linking (float steering/brake into the native formulas), art pass, config screen; **4** — kinetic output + swivel-bearing planes; **5** — public release.
 
 ## Safety (direct-drive wheels can hurt you)
 

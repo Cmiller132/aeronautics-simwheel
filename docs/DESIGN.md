@@ -199,9 +199,15 @@ Mixer: `τ_out = softknee(Σ components)` (soft-knee compressor at ~65 % of the 
 
 What the hands feel on a car, and why it's honest (all emergent from the game's own formulas once 2a lands): wheel loads up with speed and grip; goes light exactly when the front tires saturate (understeer cue); pulls into a rear slide (countersteer cue — the lateral term reverses); goes instantly light on ice (μ→0.1 fudge floor); kicks on curbs (accel spikes); loses aligning torque under heavy braking only via load transfer, not lockup (none exists).
 
-### 6.6 Device output — MOZA SDK bridge sidecar (Phase 2b, protocol implemented)
+### 6.6 Device output — native bridge sidecar (Phase 2b, IMPLEMENTED; HIL pending hardware)
 
-Unchanged and engine-side done: localhost-UDP protocol v1 (`AWFB` magic — TORQUE @150 Hz with torque cap + watchdog ms, PANIC latched, START/STOP, STATE @250 Hz with steering deg/vel/buttons, HELLO with version handshake), implemented in `engine/hal/bridge` with codec round-trip + fuzz + watchdog-conformance tests and a `FakeBridgeServer`. The native Windows sidecar on the official MOZA SDK is the Phase 2b deliverable; an SDL3 sidecar for other wheels speaks the same frames later. The bridge watchdog zeroes torque even if the JVM dies.
+The protocol (localhost-UDP v1, `AWFB` magic — TORQUE with torque cap + watchdog ms, PANIC latched, START/STOP, STATE @250 Hz with steering deg/vel/buttons, HELLO handshake) lives in `engine/hal/bridge` (codec round-trip + fuzz + watchdog-conformance tests, `FakeBridgeServer`) and now in the **Rust sidecar (`sidecar/`)** that mirrors it byte-for-byte (golden-vector-pinned).
+
+**Backend decision (2026-08-14): raw DirectInput, not the MOZA SDK.** The SDK is access-gated (RESEARCH.md §2); the R9 is a standard DirectInput PID device, and the sidecar drives it with the proven recipe — exclusive+background acquisition, autocenter off, one infinite constant-force effect updated in place (`DIEP_TYPESPECIFICPARAMS | DIEP_NORESTART`). This also makes the sidecar wheel-agnostic from day one; the planned SDL3 variant becomes a fallback, not a requirement. The MOZA SDK remains an optional future enhancement layer.
+
+Safety layers in the sidecar, independent of the mod's SafetyChain (hardened by adversarial review 2026-08-14): per-frame cap clamp AND a `--max-torque` bridge ceiling (negative/non-finite wire values fail closed), per-frame watchdog with a bounded socket-drain budget (a datagram flood can't starve it), **hardware self-expiry** (the constant-force effect has a finite 250 ms duration re-triggered every 100 ms — a hung or killed sidecar zeroes in firmware), confirmed-write torque caching with `Stop`+`STOPALL` escalation on a failed zero, wrap-aware sequence gating (stale/duplicate datagrams can't defeat PANIC or re-arm the watchdog), PANIC latched until START, zero on client change/STOP/10 s client silence, explicit per-device rated torque (MOZA R-series recognized; others require `--rated-torque`), and an operator acknowledgement gate if device autocenter can't be disabled. The mod-side `BridgeWheelDevice.Config` validates its own numbers at construction.
+
+Conformance without hardware: `cargo test` (state machine + golden vectors) plus `SidecarConformanceTest` in the engine suite — the real `BridgeWheelDevice` against the real sidecar in `--sim` mode (a critically-damped synthetic wheel) over live UDP: handshake, STATE stream, torque physically deflecting the sim wheel, watchdog recentering, panic→START recovery. The §7 hardware trip checklist ships in `sidecar/README.md` and runs when an R9 is attached.
 
 ### 6.7 Vehicle matrix
 
@@ -277,7 +283,7 @@ Ours MIT (suggested); Sable PolyForm Shield (depend, never vendor); Simulated as
 
 **Done — Phase 2a: ground telemetry (2026-08-14).** `GroundTelemetrySampler` (server rig on the wheel BE via `BlockEntitySubLevelActor`) + engine `GroundTorqueModel`/`StrikeDetector`, `FfbTelemetryPacket`/`FfbEventPacket`, client `TelemetryBuffer`/`EventImpulses` mixed into the 250 Hz loop through the soft knee, SafetyChain unchanged. *Exit met: the race-car gametest drives the craft's own link-steering from the sim wheel, shoves it into side-slip, and asserts the emitted telemetry — present at substep rate, finite, bounded, nonzero under steered slip, and dead after the input timeout. `CraftStateSource` velocity/accel cue scalars fold into Phase 2c where their consumers (damper scaling, rumble triggers) land.*
 
-**Phase 2b — MOZA bridge sidecar (Windows, hardware-in-the-loop).** Native sidecar on the MOZA SDK speaking the implemented protocol; §7 trip checklist on hardware with measured numbers. *Exit: all four HIL test series green, checklist committed.*
+**Phase 2b — bridge sidecar (Windows). Software HALF DONE (2026-08-14): the Rust/DirectInput sidecar is implemented and conformance-tested** (`cargo test` + the cross-language `SidecarConformanceTest` against the real mod client — see §6.6). **Remaining: hardware-in-the-loop.** *Exit: the four §7 trip series in `sidecar/README.md` run green on a real R9 with measured numbers committed.*
 
 **Phase 2c — end-to-end reactivity.** Curb strike < 150 ms to the rim, bump texture tracks block seams, dropout fade/recover — recorded traces. *Exit: traces committed.*
 

@@ -1,0 +1,24 @@
+[package]
+name = "simwheel-bridge"
+version = "0.1.0"
+edition = "2021"
+description = "Native FFB bridge sidecar for Aeronautics SimWheel: speaks the AWFB UDP protocol, drives a DirectInput PID wheelbase (MOZA R9 and friends)"
+license = "MIT"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_Media",
+    "Win32_System_Threading",
+    "Win32_Security",
+]
+
+[profile.release]
+opt-level = 2
+panic = "abort"

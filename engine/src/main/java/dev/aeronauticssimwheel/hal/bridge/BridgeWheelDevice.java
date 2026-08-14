@@ -31,6 +31,27 @@ public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
 
     public record Config(float rotationRangeDeg, float maxTorqueCapNm, int bridgeWatchdogMs,
                          long staleAfterNanos) {
+        /**
+         * Fail closed on nonsense: a negative cap would invert Math.min/max
+         * clamping into a CONSTANT full-cap command, and an out-of-range
+         * watchdog defeats the bridge's dead-man behavior (adversarial
+         * finding — validated here, at the single choke point).
+         */
+        public Config {
+            if (!Float.isFinite(rotationRangeDeg) || rotationRangeDeg <= 0) {
+                throw new IllegalArgumentException("rotationRangeDeg must be finite/positive");
+            }
+            if (!Float.isFinite(maxTorqueCapNm) || maxTorqueCapNm < 0 || maxTorqueCapNm > 25) {
+                throw new IllegalArgumentException("maxTorqueCapNm must be within 0..25");
+            }
+            if (bridgeWatchdogMs < 10 || bridgeWatchdogMs > 1000) {
+                throw new IllegalArgumentException("bridgeWatchdogMs must be within 10..1000");
+            }
+            if (staleAfterNanos <= 0) {
+                throw new IllegalArgumentException("staleAfterNanos must be positive");
+            }
+        }
+
         /** ±540° default range; 2.5 Nm cap mirrors the SafetyChain default. */
         public static Config defaults() {
             return new Config(1080f, 2.5f, 100, 300_000_000L);
@@ -170,8 +191,8 @@ public final class BridgeWheelDevice implements WheelDevice, AutoCloseable {
      */
     @Override
     public void ffbUpdateTorque(float normalized) {
-        if (panicLatched) {
-            return;
+        if (panicLatched || !Float.isFinite(normalized)) {
+            return; // ±Inf would clamp into a constant full-cap command
         }
         float nm = normalized * ratedTorqueNm;
         float cap = cfg.maxTorqueCapNm();

@@ -38,3 +38,30 @@ tasks.register('drivingDemo', JavaExec) {
     mainClass = 'dev.aeronauticssimwheel.sim.DrivingScenarioDemo'
     args = [project.layout.buildDirectory.file('driving-sim.csv').get().asFile.path]
 }
+
+// Phase 2b sidecar conformance (DESIGN.md §6.6). Plain `test` SKIPS the
+// cross-language test when the sidecar binary is absent (hermetic for
+// machines without Rust); THIS task builds the sidecar first and makes a
+// skip impossible — a CI job using it cannot go green on stale/missing code.
+tasks.register('buildSidecar', Exec) {
+    group = 'verification'
+    description = 'cargo build --release the native FFB sidecar'
+    workingDir = rootProject.file('sidecar')
+    commandLine 'cargo', 'build', '--release'
+}
+
+tasks.register('sidecarConformance', Test) {
+    group = 'verification'
+    description = 'Build the sidecar, then run the cross-language conformance test against the fresh binary'
+    dependsOn 'buildSidecar'
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    useJUnitPlatform()
+    filter { includeTestsMatching '*SidecarConformanceTest*' }
+    outputs.upToDateWhen { false }
+    systemProperty 'simwheel.sidecar.require', 'true'
+    testLogging {
+        events 'passed', 'failed', 'skipped'
+        exceptionFormat 'full'
+    }
+}
