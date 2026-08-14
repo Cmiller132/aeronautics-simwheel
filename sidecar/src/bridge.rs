@@ -28,12 +28,28 @@ pub const CLIENT_SILENCE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Max datagrams processed per tick — a loopback flood must never starve
 /// `run_safety` (adversarial finding: unbounded drain before the watchdog).
 pub const MAX_FRAMES_PER_TICK: u32 = 64;
+/// After a disarm, START frames are ignored this long — anything arriving
+/// within it was in flight before the connection changed and cannot be the
+/// deliberate re-engage. Imperceptible to an operator pressing a key.
+pub const REARM_BLOCK: Duration = Duration::from_millis(50);
+/// Upper bound on datagrams discarded by one flush — the socket buffer is
+/// finite, and an unbounded loop here would be a starvation hazard.
+const MAX_FLUSH_FRAMES: u32 = 4096;
 
 pub struct Bridge<D: FfbDevice> {
     socket: UdpSocket,
     device: D,
     max_torque_nm: f32,
     verbose: bool,
+    /// Operator-requested torque sign flip (`--invert-ffb`) — the escape
+    /// hatch if a platform/firmware combination turns out polarity-reversed.
+    invert: bool,
+    /// Device connection epoch at the last tick; any change disarms.
+    last_device_epoch: u32,
+    /// After a disarm, ignore START frames briefly: anything arriving in
+    /// this window was already in flight when the connection changed, so it
+    /// cannot be the deliberate re-engage the disarm demands.
+    rearm_not_before: Option<Instant>,
 
     client: Option<SocketAddr>,
     last_client_frame: Instant,
@@ -65,11 +81,15 @@ impl<D: FfbDevice> Bridge<D> {
         socket
             .set_nonblocking(true)
             .expect("nonblocking UDP socket");
+        let last_device_epoch = device.connection_epoch();
         Bridge {
             socket,
             device,
             max_torque_nm,
             verbose,
+            invert: false,
+            last_device_epoch,
+            rearm_not_before: None,
             client: None,
             last_client_frame: Instant::now(),
             last_rx_seq: None,
@@ -89,9 +109,40 @@ impl<D: FfbDevice> Bridge<D> {
         &mut self.device
     }
 
+    pub fn set_invert(&mut self, invert: bool) {
+        self.invert = invert;
+        if invert {
+            eprintln!("[bridge] --invert-ffb: torque sign flipped at the output");
+        }
+    }
+
     /// One bridge tick: drain the socket, run safety, advance the device, and
     /// (if `tick.state_due`) emit STATE. Call at ≥ STATE_HZ.
     pub fn tick(&mut self, now: Instant, dt_s: f64, tick: Tick) {
+        // Device connection changed (unplug/acquisition loss) → disarm the
+        // whole session. Torque may only resume after a fresh client START —
+        // never automatically on re-attach (someone may be holding the rim).
+        let epoch = self.device.connection_epoch();
+        if epoch != self.last_device_epoch {
+            self.last_device_epoch = epoch;
+            self.zero_torque("device connection changed");
+            // Frames that arrived while the connection was changing are
+            // still queued in the socket: discard them, or the very next
+            // drain would re-arm the session with a START the operator sent
+            // before the wheel came back (review-caught). The short rearm
+            // block covers the datagrams already in flight past the flush.
+            let dropped = self.flush_socket();
+            self.rearm_not_before = Some(now + REARM_BLOCK);
+            if self.started {
+                self.started = false;
+                eprintln!(
+                    "[bridge] device connection changed — session disarmed \
+                     ({dropped} queued frames dropped); re-engage in game to \
+                     restore forces"
+                );
+            }
+        }
+
         self.drain_socket(now);
         self.run_safety(now);
 
@@ -153,6 +204,21 @@ impl<D: FfbDevice> Bridge<D> {
         }
     }
 
+    /// Discard everything queued on the socket without interpreting it.
+    /// Returns how many datagrams were dropped.
+    fn flush_socket(&mut self) -> u32 {
+        let mut buf = [0u8; protocol::MAX_FRAME_BYTES];
+        let mut dropped = 0;
+        while dropped < MAX_FLUSH_FRAMES {
+            match self.socket.recv_from(&mut buf) {
+                Ok(_) => dropped += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+                Err(_) => break,
+            }
+        }
+        dropped
+    }
+
     /// Wrap-aware "is `seq` newer than the session's latest" (RFC 1982 style).
     fn seq_is_fresh(&self, seq: u32) -> bool {
         match self.last_rx_seq {
@@ -193,6 +259,13 @@ impl<D: FfbDevice> Bridge<D> {
 
         match frame {
             Frame::Start { .. } => {
+                if self.rearm_not_before.is_some_and(|t| now < t) {
+                    // In flight when the connection changed — not a
+                    // deliberate re-engage. Drop it; the operator's next
+                    // engage arms normally.
+                    return;
+                }
+                self.rearm_not_before = None;
                 self.panic_latched = false;
                 self.started = true;
                 self.zero_torque("start");
@@ -234,7 +307,10 @@ impl<D: FfbDevice> Bridge<D> {
                 }
                 // Double clamp: the frame's own cap AND the bridge ceiling.
                 let cap = max_torque_cap_nm.min(self.max_torque_nm);
-                let nm = torque_nm.clamp(-cap, cap);
+                let mut nm = torque_nm.clamp(-cap, cap);
+                if self.invert {
+                    nm = -nm;
+                }
                 self.device.set_torque_nm(nm);
                 self.torque_active = true;
                 // Watchdog interval from the frame, sanity-bounded 10..=1000 ms.
@@ -479,6 +555,210 @@ mod tests {
         tick(&mut bridge, Instant::now(), false);
         assert_eq!(bridge.device_mut().last_torque_nm(), 0.0,
             "a negative cap is a confused peer — reject, don't abs()");
+    }
+
+    /// SimDevice with a test-controllable connection epoch.
+    struct EpochDevice {
+        inner: SimDevice,
+        epoch: u32,
+    }
+
+    impl crate::device::FfbDevice for EpochDevice {
+        fn name(&self) -> &str {
+            "epoch test device"
+        }
+        fn rated_torque_nm(&self) -> f32 {
+            9.0
+        }
+        fn id_hash(&self) -> u32 {
+            1
+        }
+        fn poll(&mut self, dt_s: f64) -> crate::device::WheelState {
+            self.inner.poll(dt_s)
+        }
+        fn set_torque_nm(&mut self, nm: f32) {
+            self.inner.set_torque_nm(nm);
+        }
+        fn connection_epoch(&self) -> u32 {
+            self.epoch
+        }
+    }
+
+    #[test]
+    fn device_connection_change_disarms_until_fresh_start() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let dev = EpochDevice { inner: SimDevice::new(), epoch: 0 };
+        let mut bridge = Bridge::new(server, dev, DEFAULT_MAX_TORQUE_NM, false);
+
+        send(&client, addr, Frame::Start { sequence: 1 });
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 2,
+                torque_nm: 1.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(bridge.device_mut().inner.last_torque_nm(), 1.0);
+
+        // The device connection changes (unplug/replug)...
+        bridge.device_mut().epoch += 1;
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(
+            bridge.device_mut().inner.last_torque_nm(),
+            0.0,
+            "connection change must zero torque"
+        );
+
+        // ...and torque must NOT resume on its own, even with fresh frames.
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 3,
+                torque_nm: 1.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(
+            bridge.device_mut().inner.last_torque_nm(),
+            0.0,
+            "torque must stay off until a deliberate re-START"
+        );
+
+        // A fresh START (the deliberate re-engage) restores the session —
+        // once the post-disarm rearm block has passed, since a START inside
+        // it is treated as pre-change in-flight traffic.
+        std::thread::sleep(REARM_BLOCK);
+        send(&client, addr, Frame::Start { sequence: 4 });
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 5,
+                torque_nm: 1.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(bridge.device_mut().inner.last_torque_nm(), 1.0);
+    }
+
+    /// Frames sent while the device was away must not survive the disarm:
+    /// they sit in the socket buffer and would otherwise be drained (and
+    /// honoured) on the very tick that disarms.
+    #[test]
+    fn frames_queued_during_a_connection_change_cannot_rearm() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        let dev = EpochDevice { inner: SimDevice::new(), epoch: 0 };
+        let mut bridge = Bridge::new(server, dev, DEFAULT_MAX_TORQUE_NM, false);
+
+        // Engaged and driving before the wheel drops off the bus.
+        send(&client, addr, Frame::Start { sequence: 1 });
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+
+        // The connection changes, and — before the bridge next ticks — a
+        // START and a TORQUE arrive (the operator was mid-re-engage, or the
+        // client never noticed). Both are queued in the socket.
+        bridge.device_mut().epoch += 1;
+        send(&client, addr, Frame::Start { sequence: 2 });
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 3,
+                torque_nm: 2.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(
+            bridge.device_mut().inner.last_torque_nm(),
+            0.0,
+            "queued pre-reattach frames must not re-arm the session"
+        );
+
+        // Still disarmed on the following tick, too.
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 4,
+                torque_nm: 2.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(bridge.device_mut().inner.last_torque_nm(), 0.0);
+
+        // A genuinely fresh START, after the rearm block, re-engages.
+        std::thread::sleep(REARM_BLOCK);
+        send(&client, addr, Frame::Start { sequence: 5 });
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 6,
+                torque_nm: 2.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        bridge.tick(Instant::now(), 0.004, Tick { state_due: false });
+        assert_eq!(bridge.device_mut().inner.last_torque_nm(), 2.0);
+    }
+
+    #[test]
+    fn invert_flag_flips_output_sign_inside_the_clamps() {
+        let (mut bridge, client, addr) = bridge_pair();
+        bridge.set_invert(true);
+        send(&client, addr, Frame::Start { sequence: 1 });
+        std::thread::sleep(Duration::from_millis(20));
+        tick(&mut bridge, Instant::now(), false);
+        send(
+            &client,
+            addr,
+            Frame::Torque {
+                sequence: 2,
+                torque_nm: 1.0,
+                max_torque_cap_nm: 2.5,
+                watchdog_ms: 100,
+            },
+        );
+        std::thread::sleep(Duration::from_millis(20));
+        tick(&mut bridge, Instant::now(), false);
+        assert_eq!(bridge.device_mut().last_torque_nm(), -1.0);
     }
 
     #[test]

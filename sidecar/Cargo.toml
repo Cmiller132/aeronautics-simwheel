@@ -2,10 +2,13 @@
 name = "simwheel-bridge"
 version = "0.1.0"
 edition = "2021"
-description = "Native FFB bridge sidecar for Aeronautics SimWheel: speaks the AWFB UDP protocol, drives a DirectInput PID wheelbase (MOZA R9 and friends)"
+description = "Native FFB bridge sidecar for Aeronautics SimWheel: speaks the AWFB UDP protocol, drives a PID wheelbase (MOZA R9 and friends) via DirectInput on Windows or evdev on Linux"
 license = "MIT"
 
-[dependencies.windows]
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies.windows]
 version = "0.58"
 features = [
     "Win32_Foundation",

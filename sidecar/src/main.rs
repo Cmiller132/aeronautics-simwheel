@@ -1,8 +1,9 @@
 //! simwheel-bridge — native FFB sidecar for Aeronautics SimWheel.
 //!
 //! Speaks the AWFB UDP protocol (DESIGN.md §6.6) on localhost and drives a
-//! DirectInput PID wheelbase (MOZA R9 or any FFB wheel). No vendor SDK: the
-//! R9 is a standard DirectInput force-feedback device.
+//! force-feedback wheelbase (MOZA R9 or any FFB wheel) — DirectInput on
+//! Windows, kernel evdev on Linux. No vendor SDK: the R9 is a standard PID
+//! force-feedback device on both.
 //!
 //! Modes:
 //!   simwheel-bridge --list           enumerate FFB-capable devices, exit
@@ -14,13 +15,16 @@
 //! the vendor tool, default 1080), --rated-torque <Nm> (the base's rated
 //! maximum — required for wheelbases the sidecar doesn't recognize),
 //! --ack-autocenter (proceed despite an un-disableable device autocenter),
-//! --verbose.
+//! --invert-ffb (flip torque sign — for platform/firmware combinations with
+//! reversed polarity), --verbose.
 
 mod bridge;
 mod device;
 mod protocol;
 #[cfg(windows)]
 mod dinput;
+#[cfg(target_os = "linux")]
+mod evdev;
 
 use bridge::{Bridge, Tick, DEFAULT_MAX_TORQUE_NM, STATE_HZ};
 use device::FfbDevice;
@@ -36,6 +40,7 @@ struct Args {
     range_deg: f32,
     rated_torque_nm: Option<f32>,
     ack_autocenter: bool,
+    invert_ffb: bool,
     verbose: bool,
 }
 
@@ -49,6 +54,7 @@ fn parse_args() -> Args {
         range_deg: 1080.0,
         rated_torque_nm: None,
         ack_autocenter: false,
+        invert_ffb: false,
         verbose: false,
     };
     let mut it = std::env::args().skip(1);
@@ -67,6 +73,7 @@ fn parse_args() -> Args {
             "--range" => args.range_deg = num("--range") as f32,
             "--rated-torque" => args.rated_torque_nm = Some(num("--rated-torque") as f32),
             "--ack-autocenter" => args.ack_autocenter = true,
+            "--invert-ffb" => args.invert_ffb = true,
             "--verbose" | "-v" => args.verbose = true,
             "--help" | "-h" => {
                 eprintln!("see the module doc / sidecar/README.md for usage");
@@ -100,19 +107,21 @@ fn main() {
 
     if args.list {
         #[cfg(windows)]
-        {
-            match dinput::list_devices() {
-                Ok(list) if list.is_empty() => println!("no force-feedback devices attached"),
-                Ok(list) => {
-                    for (i, name) in list.iter().enumerate() {
-                        println!("{i}: {name}");
-                    }
+        let listed = dinput::list_devices().map_err(|e| e.to_string());
+        #[cfg(target_os = "linux")]
+        let listed = evdev::list_devices();
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let listed: Result<Vec<String>, String> =
+            Err("--list is supported on Windows and Linux only".into());
+        match listed {
+            Ok(list) if list.is_empty() => println!("no force-feedback devices attached"),
+            Ok(list) => {
+                for (i, name) in list.iter().enumerate() {
+                    println!("{i}: {name}");
                 }
-                Err(e) => die(&format!("DirectInput enumeration failed: {e}")),
             }
+            Err(e) => die(&format!("device enumeration failed: {e}")),
         }
-        #[cfg(not(windows))]
-        println!("--list requires Windows (DirectInput)");
         return;
     }
 
@@ -125,12 +134,14 @@ fn main() {
 
     if args.sim {
         eprintln!("[bridge] SIMULATED device — protocol conformance mode, no hardware");
-        run(Bridge::new(
+        let mut bridge = Bridge::new(
             socket,
             device::SimDevice::new(),
             args.max_torque_nm,
             args.verbose,
-        ));
+        );
+        bridge.set_invert(args.invert_ffb);
+        run(bridge);
     } else {
         #[cfg(windows)]
         {
@@ -146,10 +157,30 @@ fn main() {
                 dev.name(),
                 dev.rated_torque_nm()
             );
-            run(Bridge::new(socket, dev, args.max_torque_nm, args.verbose));
+            let mut bridge = Bridge::new(socket, dev, args.max_torque_nm, args.verbose);
+            bridge.set_invert(args.invert_ffb);
+            run(bridge);
         }
-        #[cfg(not(windows))]
-        die("real-device mode requires Windows (DirectInput); use --sim elsewhere");
+        #[cfg(target_os = "linux")]
+        {
+            let dev = evdev::EvdevDevice::open(
+                args.device_index,
+                args.range_deg,
+                args.rated_torque_nm,
+                args.ack_autocenter,
+            )
+            .unwrap_or_else(|e| die(&format!("cannot open FFB device: {e}")));
+            eprintln!(
+                "[bridge] device: '{}' (rated {} Nm — set the base's own limits too)",
+                dev.name(),
+                dev.rated_torque_nm()
+            );
+            let mut bridge = Bridge::new(socket, dev, args.max_torque_nm, args.verbose);
+            bridge.set_invert(args.invert_ffb);
+            run(bridge);
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        die("real-device mode is supported on Windows and Linux; use --sim elsewhere");
     }
 }
 

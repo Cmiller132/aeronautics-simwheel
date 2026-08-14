@@ -6,9 +6,13 @@
 //! update).
 //!
 //! Safety posture (hardened after adversarial review):
-//! - The effect runs with a FINITE duration and is re-triggered well before
-//!   expiry — if this process hangs or dies, the hardware self-zeroes without
-//!   another line of code executing.
+//! - The effect runs with a FINITE duration; while torque is nonzero it is
+//!   re-triggered well before expiry — if this process hangs or dies, the
+//!   hardware self-zeroes without another line of code executing. It is
+//!   NEVER played while the confirmed magnitude is zero, and never re-played
+//!   while parameters are unconfirmed — so a zero that a driver accepted but
+//!   the async transport lost still decays within one lease instead of being
+//!   replayed, and stale parameters can never be re-started.
 //! - Effect parameters live in owned, stable storage for the device's whole
 //!   lifetime (DirectInput does not promise to copy `lpvTypeSpecificParams`).
 //! - The magnitude cache updates ONLY on a successful write; a failed ZERO
@@ -23,7 +27,7 @@
 
 #![allow(clippy::upper_case_acronyms)]
 
-use crate::device::{FfbDevice, WheelState};
+use crate::device::{resolve_rated_nm, FfbDevice, WheelState};
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::core::{w, Interface, GUID};
@@ -99,6 +103,9 @@ pub struct DirectInputDevice {
     rated_nm: f32,
     prev_deg: f32,
     vel_deg_per_s: f32,
+    /// Suppress the velocity sample right after (re)acquisition — a stale
+    /// prev_deg against a fresh angle would synthesize an enormous spike.
+    skip_vel_sample: bool,
     input_fault: bool,
     output_fault: bool,
     /// Owned, stable storage for the effect parameters — DirectInput keeps
@@ -108,10 +115,23 @@ pub struct DirectInputDevice {
     _axes: Box<[u32; 1]>,
     _direction: Box<[i32; 1]>,
     last_magnitude: i32,
-    /// True only while the last parameter write is KNOWN applied.
+    /// True only while the last parameter write is KNOWN accepted. While
+    /// false the effect is QUARANTINED: never played, and the only permitted
+    /// write is one that forces a known zero (a Start would replay whatever
+    /// stale parameters the device still stores).
     params_valid: bool,
     needs_start: bool,
     effect_started_at: Option<Instant>,
+    /// Throttles play retries after a failed Start so a marginal driver
+    /// isn't hammered at loop rate; the first Start after a fresh parameter
+    /// write is never delayed by it (the previous attempt is long past).
+    last_play_attempt: Option<Instant>,
+    /// True between detecting acquisition loss and recovering it, so both
+    /// transitions bump the epoch exactly once.
+    connection_lost: bool,
+    /// Bumped on acquisition loss AND on recovery; the bridge disarms on any
+    /// change so forces only resume after a deliberate client re-engage.
+    epoch: u32,
 }
 
 struct EnumCtx {
@@ -207,28 +227,6 @@ fn pump_messages(hwnd: HWND) {
             DispatchMessageW(&msg);
         }
     }
-}
-
-/// Rated torque resolution: explicit flag wins; known MOZA R-series names
-/// carry vendor numbers; anything else must be told (a wrong rating rescales
-/// every Nm cap in the whole chain).
-fn resolve_rated_nm(name: &str, explicit: Option<f32>) -> Result<f32, String> {
-    if let Some(nm) = explicit {
-        return Ok(nm);
-    }
-    let n = name.to_ascii_lowercase();
-    for (needle, nm) in [
-        ("r3 ", 3.9f32), ("r5 ", 5.5), ("r9 ", 9.0), ("r12 ", 12.0),
-        ("r16 ", 16.0), ("r21 ", 21.0),
-    ] {
-        if n.contains("moza") && (n.contains(needle) || n.ends_with(needle.trim_end())) {
-            return Ok(nm);
-        }
-    }
-    Err(format!(
-        "unknown wheelbase '{name}': pass --rated-torque <Nm> (the base's rated \
-         maximum) so torque caps scale correctly"
-    ))
 }
 
 impl DirectInputDevice {
@@ -372,6 +370,7 @@ impl DirectInputDevice {
                 rated_nm,
                 prev_deg: 0.0,
                 vel_deg_per_s: 0.0,
+                skip_vel_sample: true,
                 input_fault: false,
                 output_fault: false,
                 cf,
@@ -379,17 +378,55 @@ impl DirectInputDevice {
                 _direction: direction,
                 last_magnitude: 0,
                 params_valid: true,
-                needs_start: true,
+                needs_start: false,
                 effect_started_at: None,
+                last_play_attempt: None,
+                connection_lost: false,
+                epoch: 0,
             };
-            dev.ensure_effect_running();
+            // The zero-magnitude effect is created (downloaded) but NOT
+            // played: a zero needs no playing effect, and never playing at
+            // zero is what makes the finite lease the zero-state guarantee.
             Ok(dev)
         }
     }
 
-    /// (Re-)trigger the finite-duration effect before it expires. Also the
-    /// re-download path after acquisition loss (Start downloads as needed).
+    /// The retrigger/recovery loop, run every poll.
+    ///
+    /// - Quarantined (`!params_valid`): the ONLY permitted action is forcing
+    ///   the parameters to a known ZERO — never Start, which would replay
+    ///   whatever stale parameters the device stores (review-caught).
+    /// - Confirmed zero: nothing to play — let the finite lease lapse.
+    /// - Confirmed nonzero: (re)trigger ahead of expiry. Start doubles as
+    ///   the re-download path after acquisition loss.
     fn ensure_effect_running(&mut self) {
+        if !self.params_valid {
+            unsafe {
+                self.cf.lMagnitude = 0;
+                let mut eff = DIEFFECT {
+                    dwSize: std::mem::size_of::<DIEFFECT>() as u32,
+                    cbTypeSpecificParams: std::mem::size_of::<DICONSTANTFORCE>() as u32,
+                    lpvTypeSpecificParams: &mut *self.cf as *mut _ as *mut c_void,
+                    ..Default::default()
+                };
+                if self
+                    .effect
+                    .SetParameters(&mut eff, DIEP_TYPESPECIFICPARAMS | DIEP_NORESTART)
+                    .is_ok()
+                {
+                    self.last_magnitude = 0;
+                    self.params_valid = true;
+                    self.needs_start = false;
+                    self.effect_started_at = None;
+                    let _ = self.effect.Stop();
+                    self.output_fault = false;
+                }
+            }
+            return;
+        }
+        if self.last_magnitude == 0 {
+            return; // zero needs no playing effect — let the lease lapse
+        }
         let now = Instant::now();
         let due = self.needs_start
             || self
@@ -398,7 +435,42 @@ impl DirectInputDevice {
         if !due {
             return;
         }
+        // Don't hammer a failing driver at loop rate: a retry after a failed
+        // Start waits out the retrigger period. A first Start right after a
+        // fresh parameter write is unaffected (last attempt is long past).
+        if self
+            .last_play_attempt
+            .is_some_and(|t| now.duration_since(t) < EFFECT_RETRIGGER_EVERY)
+        {
+            return;
+        }
         unsafe {
+            // Refresh the parameters on every PERIODIC retrigger, even though
+            // the magnitude is unchanged: the HID transport is asynchronous,
+            // so an earlier accepted-but-lost update would otherwise let the
+            // base replay a stale stored magnitude forever behind the dedup
+            // cache (review-caught). Bounded by one retrigger period. Skipped
+            // when the effect isn't playing yet — the 0→nonzero path just
+            // wrote these exact parameters.
+            if self.effect_started_at.is_some() {
+                self.cf.lMagnitude = self.last_magnitude;
+                let mut eff = DIEFFECT {
+                    dwSize: std::mem::size_of::<DIEFFECT>() as u32,
+                    cbTypeSpecificParams: std::mem::size_of::<DICONSTANTFORCE>() as u32,
+                    lpvTypeSpecificParams: &mut *self.cf as *mut _ as *mut c_void,
+                    ..Default::default()
+                };
+                if self
+                    .effect
+                    .SetParameters(&mut eff, DIEP_TYPESPECIFICPARAMS | DIEP_NORESTART)
+                    .is_err()
+                {
+                    self.params_valid = false;
+                    self.output_fault = true;
+                    return;
+                }
+            }
+            self.last_play_attempt = Some(now);
             match self.effect.Start(1, 0) {
                 Ok(()) => {
                     self.effect_started_at = Some(now);
@@ -427,6 +499,10 @@ impl FfbDevice for DirectInputDevice {
         self.id_hash
     }
 
+    fn connection_epoch(&self) -> u32 {
+        self.epoch
+    }
+
     fn poll(&mut self, dt_s: f64) -> WheelState {
         pump_messages(self.hwnd);
         self.ensure_effect_running();
@@ -441,7 +517,11 @@ impl FfbDevice for DirectInputDevice {
                 Ok(()) => {
                     self.input_fault = false;
                     let deg = raw.lx as f32 / 32767.0 * (self.range_deg / 2.0);
-                    if dt_s > 0.0 {
+                    if self.skip_vel_sample {
+                        // First sample after (re)acquire: seed, don't differentiate.
+                        self.skip_vel_sample = false;
+                        self.vel_deg_per_s = 0.0;
+                    } else if dt_s > 0.0 {
                         // Light smoothing on the derivative: raw HID deltas are steppy.
                         let v = (deg - self.prev_deg) / dt_s as f32;
                         self.vel_deg_per_s += (v - self.vel_deg_per_s) * 0.3;
@@ -462,11 +542,25 @@ impl FfbDevice for DirectInputDevice {
                 }
                 Err(e) if e.code().0 == DIERR_INPUTLOST || e.code().0 == DIERR_NOTACQUIRED => {
                     self.input_fault = true;
+                    if !self.connection_lost {
+                        // Entering the lost state disarms immediately, so a
+                        // START arriving mid-outage can't become authority
+                        // over the wheel when it comes back.
+                        self.connection_lost = true;
+                        self.epoch = self.epoch.wrapping_add(1);
+                    }
                     if self.device.Acquire().is_ok() {
-                        // Acquisition loss unloads effects: force re-download
-                        // and a parameter rewrite on the next torque call.
-                        self.needs_start = true;
+                        // Acquisition loss unloads effects: quarantine until
+                        // a zero rewrite confirms, and bump the connection
+                        // epoch — the bridge disarms and requires a fresh
+                        // client START before any torque resumes.
+                        self.needs_start = false;
                         self.params_valid = false;
+                        self.skip_vel_sample = true;
+                        // Recovery is the second transition — bump again so
+                        // the session disarms on the RETURN as well.
+                        self.connection_lost = false;
+                        self.epoch = self.epoch.wrapping_add(1);
                     }
                     WheelState {
                         steering_deg: self.prev_deg,
@@ -495,6 +589,13 @@ impl FfbDevice for DirectInputDevice {
         if magnitude == self.last_magnitude && self.params_valid {
             return; // known applied — don't spam the driver
         }
+        if !self.params_valid && magnitude != 0 {
+            // Quarantined: only ZERO may be written — a nonzero write here
+            // would re-validate the cache without the confirmed zero the
+            // quarantine exists to obtain (review-caught bypass).
+            self.output_fault = true;
+            return;
+        }
         unsafe {
             self.cf.lMagnitude = magnitude;
             let mut eff = DIEFFECT {
@@ -514,6 +615,24 @@ impl FfbDevice for DirectInputDevice {
                     self.last_magnitude = magnitude;
                     self.params_valid = true;
                     self.output_fault = false;
+                    if magnitude == 0 {
+                        // Stop playback too (belt and braces against a lost
+                        // zero update in the async HID transport); the play
+                        // policy keeps a zero effect unplayed, so a lost
+                        // zero decays within one finite lease.
+                        let _ = self.effect.Stop();
+                        self.effect_started_at = None;
+                        self.needs_start = false;
+                        // Clear the retry throttle too: the next nonzero
+                        // writes fresh parameters and must play immediately,
+                        // or a rapid zero crossing would cost up to a
+                        // retrigger period of dead torque (review-caught).
+                        self.last_play_attempt = None;
+                    } else if self.effect_started_at.is_none() {
+                        // 0 → nonzero transition: the effect isn't playing.
+                        self.needs_start = true;
+                        self.ensure_effect_running();
+                    }
                 }
                 Err(_) => {
                     self.params_valid = false;
@@ -526,11 +645,14 @@ impl FfbDevice for DirectInputDevice {
                         if stopped || all_stopped {
                             self.last_magnitude = 0;
                             self.params_valid = true;
-                            self.needs_start = true; // effect must restart later
+                            // The device still stores the STALE parameters —
+                            // never replay them: the effect stays unplayed at
+                            // zero, and any nonzero must rewrite them first.
+                            self.needs_start = false;
                             self.effect_started_at = None;
                         }
-                        // else: params_valid stays false → every later call,
-                        // including the bridge's repeated zeroes, retries.
+                        // else: params_valid stays false → quarantined; the
+                        // ensure loop retries the forced zero every poll.
                     }
                 }
             }

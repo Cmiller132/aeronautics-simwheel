@@ -24,15 +24,21 @@ telemetry rig that streams tire forces back to your wheelbase.
 Grab two files from the
 [latest release](https://github.com/Cmiller132/aeronautics-simwheel/releases):
 
-1. **`simwheel-testkit-x.y.z.mrpack`** — open it with the
-   [Modrinth App](https://modrinth.com/app) (or Prism Launcher). It contains
-   the entire pinned mod stack (Create, Sable, the bundled
+1. **`simwheel-testkit-x.y.z.mrpack`** — open it with
+   [Prism Launcher](https://prismlauncher.org/) (Add Instance → Import) or
+   the [Modrinth App](https://modrinth.com/app). It contains the entire
+   pinned mod stack (Create, Sable, the bundled
    Simulated/Aeronautics/Offroad jar), this mod, **and** the ready-to-drive
-   test car schematic. One file, press Play.
-2. **`simwheel-ffb-bridge-x.y.z-windows.zip`** — only if you want force
-   feedback on a real wheel: unzip, double-click `START-FFB-BRIDGE.bat`,
-   leave the window open. The game auto-detects it. (MOZA users: game-FFB
-   mode in Pit House, in-base spring/damper at 0, rotation 1080°.)
+   test car schematic. One file, press Play. Works on Windows and Linux.
+2. **The FFB bridge for your OS** — only if you want force feedback on a
+   real wheel. Windows: `simwheel-ffb-bridge-x.y.z-windows.zip` — unzip,
+   double-click `START-FFB-BRIDGE.bat`, leave the window open. Linux:
+   `simwheel-ffb-bridge-x.y.z-linux-x86_64.tar.gz` — extract, run
+   `./start-ffb-bridge.sh` in a terminal, leave it open (needs kernel
+   6.15+ or a hid-universal-pidff backport for MOZA; see
+   [TESTING.md](TESTING.md)). The game auto-detects the bridge either way.
+   (MOZA users: game-FFB mode in Pit House, in-base spring/damper at 0,
+   rotation 1080°.)
 
 No wheel? Everything still works — W/S/A/D drive the car from the keyboard,
 and **K** toggles a demo input that sweeps all axes.
@@ -102,7 +108,7 @@ dye ×2.
 |---|---|
 | Tire-force telemetry (server → your rim) | implemented + gametested — self-aligning torque, bump texture, contact strikes, all from the game's own wheel-mount math |
 | Client feel (soft lock, damper, friction, telemetry mix, safety chain) | implemented + unit-tested, runs on a 250 Hz thread |
-| Native output bridge (`sidecar/`, Rust + DirectInput) | implemented + conformance-tested; **hardware-in-the-loop pending** — the [checklist](sidecar/README.md) needs a real R9 |
+| Native output bridge (`sidecar/`, Rust — DirectInput on Windows, evdev on Linux) | implemented + conformance-tested on both platforms; **hardware-in-the-loop pending** — the [checklist](sidecar/README.md) needs a real R9 |
 
 **Safety, non-negotiable**: a 9 Nm direct-drive base can hurt you. The chain
 clamps at 2.5 Nm by default with ramp-in, slew limiting, watchdogs at every
@@ -131,6 +137,9 @@ that's known.
   frequency.
 - `./gradlew :engine:sidecarConformance` — builds the Rust sidecar (needs
   cargo) and runs the cross-language conformance harness against it.
+- Linux sidecar build: `cd sidecar && CARGO_TARGET_DIR=target-linux cargo
+  build --release` (from WSL or any Linux box; the separate target dir keeps
+  it from clobbering a Windows build in the same checkout).
 - `./gradlew :mod:runClient` / `:mod:runClientSelftest` — dev client; the
   selftest boots, logs input/FFB state, and quits.
 - `python tools/make_test_structures.py` — regenerates the gametest
@@ -147,7 +156,7 @@ adapter; `sidecar/` is the native FFB process.
 | Minecraft / loader | 1.21.1, NeoForge |
 | Against | Create 6.x + The Simulated Project 1.3.x (MIT code) |
 | Physics | [Sable](https://github.com/ryanhcode/sable) (Rapier-based, PolyForm Shield) |
-| FFB output | `sidecar/` — Rust + DirectInput over localhost UDP |
+| FFB output | `sidecar/` — Rust over localhost UDP; DirectInput (Windows) / evdev (Linux) |
 
 License: MIT (Sable itself is PolyForm Shield — depended on, never vendored;
 Simulated's assets are ARR — none shipped).

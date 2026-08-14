@@ -3,36 +3,57 @@
 You're testing a Minecraft mod that drives Create-mod vehicles with a real
 sim racing wheel — including **real force feedback** computed from the game's
 physics. Your setup (R9 base, no pedals) is fully supported: pedals are
-replaced by keyboard keys.
+replaced by keyboard keys. Windows and Linux are both supported.
 
 Everything you need is in the latest
 [GitHub release](https://github.com/Cmiller132/aeronautics-simwheel/releases):
-`simwheel-testkit-x.y.z.mrpack` (the game side, everything bundled) and
-`simwheel-ffb-bridge-x.y.z-windows.zip` (the force-feedback side).
+`simwheel-testkit-x.y.z.mrpack` (the game side, everything bundled) and the
+force-feedback bridge for your OS —
+`simwheel-ffb-bridge-x.y.z-windows.zip` or
+`simwheel-ffb-bridge-x.y.z-linux-x86_64.tar.gz`.
 
 ## Setup — about 10 minutes
 
 ### 1. Game
 
-1. Install the [Modrinth App](https://modrinth.com/app) (or Prism Launcher).
-2. Open `simwheel-testkit-x.y.z.mrpack` with it (drag it in / File → Add
-   instance → From file). Everything is inside — all mods **and** the test
-   car schematic. Press Play once so it downloads and reaches the title
-   screen (first launch takes a few minutes).
+1. Open `simwheel-testkit-x.y.z.mrpack` with **Prism Launcher**
+   (Add Instance → Import → pick the file) or the
+   [Modrinth App](https://modrinth.com/app) (drag it in). Everything is
+   inside — all mods **and** the test car schematic.
+2. Press Play once so it downloads and reaches the title screen (first
+   launch takes a few minutes).
 
 ### 2. Wheel
 
 1. In **MOZA Pit House**: game FFB mode, in-base **spring = 0, damper = 0**,
    rotation **1080°**, and the base's own torque limit at **50%** for now.
 2. Plug the base in **before launching Minecraft**.
+3. **Linux only**: force feedback comes from the kernel's
+   `hid-universal-pidff` driver — check `uname -r` and make sure you're on
+   **6.15+** (or the backports: 6.12.24 / 6.13.12 / 6.14.3). On an older
+   kernel, install the
+   [DKMS driver](https://github.com/JacKeTUs/universal-pidff) first.
 
 ### 3. Force feedback bridge
 
-1. Unzip `simwheel-ffb-bridge-...-windows.zip` anywhere.
-2. Double-click **START-FFB-BRIDGE.bat** and leave the window open. It finds
-   the R9 by itself; the game finds the bridge by itself within ~2 seconds,
-   before or after launching. (No bridge running = everything still works,
-   just no forces.)
+**Windows**: unzip `simwheel-ffb-bridge-...-windows.zip` anywhere,
+double-click **START-FFB-BRIDGE.bat**, leave the window open.
+
+**Linux**: from a terminal —
+
+```bash
+tar xzf simwheel-ffb-bridge-*-linux-x86_64.tar.gz
+cd simwheel-ffb-bridge
+./start-ffb-bridge.sh
+```
+
+Leave the terminal open. If it reports a permission error on
+`/dev/input`, run `sudo usermod -aG input $USER`, log out and back in,
+and start it again.
+
+Either way the bridge finds the R9 by itself, and the game finds the
+bridge by itself within ~2 seconds, before or after launching. (No bridge
+running = everything still works, just no forces.)
 
 ## Drive
 
@@ -72,10 +93,16 @@ and the live FFB torque.
 - **Driving**: the wheel loads up in corners (the game's actual tire forces,
   not canned effects), goes light when the front tires let go, kicks on curb
   strikes and landings, and pulls toward straight when you exit a corner.
+- **If it ever pulls harder INTO the corner** instead of back toward
+  straight: let go, close the bridge, and report it — that's a reversed
+  sign convention on your platform, a one-line fix for us, and exactly the
+  kind of thing this test exists to catch.
 - **Kill tests, once driving feels fine** (this is real safety validation):
-  1. While feeling cornering force, **close the game with Task Manager** —
-     the rim must go limp within a blink (~150 ms).
-  2. While engaged, **close the bridge window** — same: limp, game unbothered.
+  1. While feeling cornering force, **force-quit the game** (Task Manager
+     on Windows; `kill -9` its PID on Linux) — the rim must go limp within
+     a blink (~150 ms).
+  2. While engaged, **close the bridge window/terminal** — same: limp,
+     game unbothered.
   3. Re-engage afterward — forces must come back only after a deliberate
      **J** re-engage, never on their own.
 
@@ -84,7 +111,8 @@ and the live FFB torque.
 | Symptom | Fix |
 |---|---|
 | HUD says `keyboard` instead of your wheel | Base plugged in before launch? Bridge window open and showing your device name? |
-| No forces at all | Bridge window running? Pit House in game FFB mode? HUD torque nonzero while cornering? |
+| No forces at all | Bridge running? Pit House in game FFB mode? On Linux: kernel 6.15+/backport (see Setup §2)? HUD torque nonzero while cornering? |
+| Bridge prints a permission error (Linux) | `sudo usermod -aG input $USER`, log out and back in |
 | Steering direction reversed | Sneak-right-click the wheel block to cycle to `STEER_LEFT`/`STEER_RIGHT`, re-bind each to the other's item pair (lime wool + lime glazed terracotta, both orders) — or just report it, it's a one-line fix for us |
 | Car won't move | Assembled (right-clicked the assembler)? Engaged (J while seated)? Holding W? |
 | Wheel feels notchy/oscillates | Report it with the HUD torque reading — gain tuning is exactly the feedback we need |

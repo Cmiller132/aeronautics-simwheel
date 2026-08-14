@@ -10,6 +10,28 @@ pub struct WheelState {
     pub fault: bool,
 }
 
+/// Rated torque resolution shared by the platform backends: explicit flag
+/// wins; known MOZA R-series names carry vendor numbers; anything else must
+/// be told (a wrong rating rescales every Nm cap in the whole chain).
+pub fn resolve_rated_nm(name: &str, explicit: Option<f32>) -> Result<f32, String> {
+    if let Some(nm) = explicit {
+        return Ok(nm);
+    }
+    let n = name.to_ascii_lowercase();
+    for (needle, nm) in [
+        ("r3 ", 3.9f32), ("r5 ", 5.5), ("r9 ", 9.0), ("r12 ", 12.0),
+        ("r16 ", 16.0), ("r21 ", 21.0),
+    ] {
+        if n.contains("moza") && (n.contains(needle) || n.ends_with(needle.trim_end())) {
+            return Ok(nm);
+        }
+    }
+    Err(format!(
+        "unknown wheelbase '{name}': pass --rated-torque <Nm> (the base's rated \
+         maximum) so torque caps scale correctly"
+    ))
+}
+
 pub trait FfbDevice {
     /// Human-readable identity for HELLO / logs.
     fn name(&self) -> &str;
@@ -22,6 +44,14 @@ pub trait FfbDevice {
     /// Apply a torque command (Nm, already capped upstream). The device layer
     /// clamps once more against its own rated torque — defense in depth.
     fn set_torque_nm(&mut self, nm: f32);
+    /// Monotonic counter that advances whenever the physical connection is
+    /// lost (unplug, acquisition loss). The bridge watches it and DISARMS the
+    /// session on any change — forces may only resume after the client sends
+    /// a fresh START (i.e., a deliberate re-engage), never automatically on
+    /// re-attach while someone may be handling the wheel.
+    fn connection_epoch(&self) -> u32 {
+        0
+    }
 }
 
 /// `--sim`: a spring–damper–inertia wheel driven by the commanded torque, so a
@@ -132,5 +162,15 @@ mod tests {
         assert_eq!(sim.last_torque_nm(), 0.0);
         sim.set_torque_nm(f32::INFINITY);
         assert_eq!(sim.last_torque_nm(), 0.0);
+    }
+
+    #[test]
+    fn rated_torque_resolution() {
+        assert_eq!(resolve_rated_nm("anything", Some(7.5)), Ok(7.5));
+        assert_eq!(resolve_rated_nm("MOZA R9 Base", None), Ok(9.0));
+        assert_eq!(resolve_rated_nm("Gudsen MOZA R16", None), Ok(16.0));
+        assert!(resolve_rated_nm("Some Unknown Wheel", None).is_err());
+        // "moza" alone must not match — the model number carries the rating.
+        assert!(resolve_rated_nm("MOZA mystery base", None).is_err());
     }
 }
