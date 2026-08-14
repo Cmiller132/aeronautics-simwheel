@@ -12,54 +12,39 @@ controller (throttle/brake/clutch + 8 buttons over Create redstone-link
 frequencies — a drop-in replacement for linked-typewriter wiring), and the
 telemetry rig that streams tire forces back to your wheelbase.
 
+> **Here to test?** Read **[TESTING.md](TESTING.md)** — a 10-minute
+> walkthrough from download to driving with force feedback.
+
 ---
 
-## Installing (for testers)
+## Installing
 
-### 1. Minecraft + mods
+### The easy way (recommended)
 
-You need **Minecraft 1.21.1** with **NeoForge 21.1.228 or newer**, plus these
-mods (all on Modrinth; a launcher like Prism/Modrinth App will pull their
-dependencies automatically):
+Grab two files from the
+[latest release](https://github.com/Cmiller132/aeronautics-simwheel/releases):
 
-| Mod | Version | Note |
-|---|---|---|
-| Create | 6.0.10+ | plus its own deps (Ponder, Flywheel) |
-| Create: Simulated | 1.3.x | pulls Sable (the physics engine) and Veil |
-| Create: Offroad | 1.3.x | wheels & suspension — needed for cars and the test schematic |
-| Create: Aeronautics | 1.3.x | optional, not needed for ground testing |
+1. **`simwheel-testkit-x.y.z.mrpack`** — open it with the
+   [Modrinth App](https://modrinth.com/app) (or Prism Launcher). It contains
+   the entire pinned mod stack (Create, Sable, the bundled
+   Simulated/Aeronautics/Offroad jar), this mod, **and** the ready-to-drive
+   test car schematic. One file, press Play.
+2. **`simwheel-ffb-bridge-x.y.z-windows.zip`** — only if you want force
+   feedback on a real wheel: unzip, double-click `START-FFB-BRIDGE.bat`,
+   leave the window open. The game auto-detects it. (MOZA users: game-FFB
+   mode in Pit House, in-base spring/damper at 0, rotation 1080°.)
 
-### 2. This mod
+No wheel? Everything still works — W/S/A/D drive the car from the keyboard,
+and **K** toggles a demo input that sweeps all axes.
 
-Grab `aeronautics-simwheel-x.y.z.jar` from the repo's releases if one is
-published, or build it yourself (needs **JDK 21**, nothing else):
+### The manual way
 
-```bash
-./gradlew :mod:build
-```
-
-The jar lands in `mod/build/libs/` — drop it in your instance's `mods/`
-folder alongside the rest.
-
-### 3. The test car (recommended)
-
-Copy [`schematics/simwheel_race_car.nbt`](schematics/) into your Minecraft
-instance's `schematics/` folder (Create makes this folder; create it if it
-doesn't exist). It's a ready-to-drive race car with the Sim Steering Wheel
-aboard and **every channel pre-bound to the car's own wiring** — steering,
-throttle, reverse on wheel button 1, per-wheel analog brakes, and a failsafe
-brake preset.
-
-### 4. Your wheel (optional — everything also works keyboard-free via demo input)
-
-Plug the wheel in **before launching the game** (input is read through the
-game's own GLFW; hot-plug rescans every second but a fresh boot is the sure
-path). For MOZA: set the base to **game FFB mode** in Pit House with in-base
-spring/damper at zero. Pedals work whether they enumerate through the base or
-standalone.
-
-Force-feedback *output* additionally needs the native bridge sidecar — see
-[`sidecar/README.md`](sidecar/README.md). Input and driving work without it.
+Minecraft 1.21.1 + NeoForge 21.1.228+, then from Modrinth: **Create**
+(6.0.10+), **Sable**, and **Create Aeronautics** (the 1.3.x bundled jar —
+it contains Simulated and Offroad). Build this mod with `./gradlew :mod:build`
+(JDK 21) and drop `mod/build/libs/aeronautics-simwheel-x.y.z.jar` into
+`mods/`. Copy [`schematics/simwheel_race_car.nbt`](schematics/) into the
+instance's `schematics/` folder.
 
 ---
 
@@ -74,8 +59,10 @@ Force-feedback *output* additionally needs the native bridge sidecar — see
 4. No wheel attached? Press **K** first — a sine-sweep demo input drives all
    axes so you can watch the whole chain work without hardware.
 5. Drive: steering is 1:1 with your wheel (±450° lock by default), throttle
-   pedal accelerates, brake pedal brakes each wheel individually
-   (analog, load-scaled), **button 1** engages reverse.
+   pedal accelerates, brake pedal brakes each wheel individually (analog,
+   load-scaled), a rim button engages reverse. **No pedals or no wheel?**
+   The keyboard is always merged in: hold **W** for throttle, **S** for
+   brake, and **A/D** steer whenever the wheel is centered or absent.
 6. Get out of the seat (or just stop sending input for 1.5 s) — control
    releases, steering recenters, and the failsafe brake latches so the car
    stops instead of coasting away.

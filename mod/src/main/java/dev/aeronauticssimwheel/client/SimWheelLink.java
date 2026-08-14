@@ -28,6 +28,8 @@ public final class SimWheelLink {
     private static final int HEARTBEAT_TICKS = 10;
     private static final int FIRST_BTN_DEVICE_INDEX = 2;
     private static final int BTN_COUNT = 8;
+    /** A/D fallback steer: half lock — brisk but controllable at speed. */
+    private static final float KEYBOARD_STEER = 0.5f;
 
     /** Per-button toggle mode (client-side; config UI later). All momentary for now. */
     private static final boolean[] TOGGLE_MODE = new boolean[BTN_COUNT];
@@ -53,11 +55,6 @@ public final class SimWheelLink {
         if (mc.level == null || mc.player == null) {
             return;
         }
-        if (!input.hasInput()) {
-            mc.player.displayClientMessage(
-                    Component.literal("SimWheel: no input device (press K for demo input)"), true);
-            return;
-        }
         if (!mc.player.isPassenger()) {
             mc.player.displayClientMessage(
                     Component.literal("SimWheel: sit in the craft's seat first"), true);
@@ -74,15 +71,16 @@ public final class SimWheelLink {
         engaged = true;
         lastSteering = Float.NaN;
         ticksSinceSend = 0;
-        mc.player.displayClientMessage(
-                Component.literal("SimWheel engaged @ " + pos.toShortString()), true);
+        mc.player.displayClientMessage(Component.literal("SimWheel engaged @ "
+                + pos.toShortString()
+                + (input.hasInput() ? "" : " — keyboard control (W/S/A/D)")), true);
     }
 
     public void tick(Minecraft mc, WheelInput input) {
         if (!engaged) {
             return;
         }
-        if (mc.level == null || mc.player == null || pos == null || !input.hasInput()
+        if (mc.level == null || mc.player == null || pos == null
                 || !(mc.level.getBlockState(pos).getBlock() instanceof SimSteeringWheelBlock)) {
             engaged = false;
             pos = null;
@@ -93,11 +91,33 @@ public final class SimWheelLink {
             return;
         }
 
-        float steering = input.adapter().value(LogicalAxis.STEERING);
-        float throttle = input.adapter().unipolar(LogicalAxis.THROTTLE);
-        float brake = input.adapter().unipolar(LogicalAxis.BRAKE);
-        float clutch = input.adapter().unipolar(LogicalAxis.CLUTCH);
-        int buttons = buttonMask(input.activeDevice());
+        float steering = 0f;
+        float throttle = 0f;
+        float brake = 0f;
+        float clutch = 0f;
+        int buttons = 0;
+        if (input.hasInput()) {
+            steering = input.adapter().value(LogicalAxis.STEERING);
+            throttle = input.adapter().unipolar(LogicalAxis.THROTTLE);
+            brake = input.adapter().unipolar(LogicalAxis.BRAKE);
+            clutch = input.adapter().unipolar(LogicalAxis.CLUTCH);
+            buttons = buttonMask(input.activeDevice());
+        }
+
+        // Keyboard merge: pedals for wheelbase-only rigs (no pedal set yet),
+        // and full W/S/A/D control with no hardware at all. Keys use the
+        // vanilla movement binds, which do nothing while seated.
+        if (mc.options.keyUp.isDown()) {
+            throttle = Math.max(throttle, 1f);
+        }
+        if (mc.options.keyDown.isDown()) {
+            brake = Math.max(brake, 1f);
+        }
+        boolean left = mc.options.keyLeft.isDown();
+        boolean right = mc.options.keyRight.isDown();
+        if (Math.abs(steering) < 0.02f && (left ^ right)) {
+            steering = right ? KEYBOARD_STEER : -KEYBOARD_STEER;
+        }
         commandedSteering = steering;
 
         ticksSinceSend++;

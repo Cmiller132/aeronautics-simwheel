@@ -64,7 +64,7 @@ public final class SimWheelClient {
 
     private static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
-        input.tick();
+        input.tick(link.isEngaged());
 
         while (KEY_DEMO.consumeClick()) {
             input.toggleDemo();

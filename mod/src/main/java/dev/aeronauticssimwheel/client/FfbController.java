@@ -98,18 +98,13 @@ public final class FfbController {
 
     /** Game thread, once per client tick: publish inputs for the FFB thread. */
     public void updateFromGame(Minecraft mc, WheelInput input, SimWheelLink link) {
-        boolean engaged = link.isEngaged() && input.hasInput();
+        boolean engaged = link.isEngaged();
 
         if (engaged != wasEngaged) {
             if (engaged) {
                 safety.engage();
-                WheelDevice d = input.activeDevice();
-                // Input-only backend (GLFW): feel computed, not written
-                desiredDevice = d != null && d.capabilities().contains(Capability.FFB_CONSTANT)
-                        ? d : null;
             } else {
                 safety.disengage();
-                desiredDevice = null;
                 // Rig teardown: a strike or stale telemetry from this vehicle
                 // must not survive into the next engagement (or next server).
                 impulses.clear();
@@ -118,6 +113,12 @@ public final class FfbController {
             }
             wasEngaged = engaged;
         }
+
+        // Tracked every tick, not just on the engage edge: the bridge sidecar
+        // may connect (or die) mid-session, and the FFB thread applies the
+        // transition. Input-only backends (GLFW): feel computed, not written.
+        WheelDevice d = engaged ? input.activeDevice() : null;
+        desiredDevice = d != null && d.capabilities().contains(Capability.FFB_CONSTANT) ? d : null;
 
         if (!engaged) {
             snapshot = Snapshot.IDLE;

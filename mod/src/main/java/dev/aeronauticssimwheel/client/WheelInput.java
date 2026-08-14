@@ -3,31 +3,62 @@ package dev.aeronauticssimwheel.client;
 import dev.aeronauticssimwheel.AeronauticsSimwheel;
 import dev.aeronauticssimwheel.hal.WheelAdapter;
 import dev.aeronauticssimwheel.hal.WheelDevice;
+import dev.aeronauticssimwheel.hal.bridge.BridgeProtocol;
+import dev.aeronauticssimwheel.hal.bridge.BridgeWheelDevice;
 import dev.aeronauticssimwheel.hal.glfw.GlfwWheelDevice;
 import org.lwjgl.glfw.GLFW;
 
+import java.net.InetSocketAddress;
+
 /**
- * Owns the active input device + adapter. Rescans GLFW joysticks (Minecraft's
- * own LWJGL, render thread) until one appears; the demo keybind swaps in a
- * {@link DemoWheelDevice} for hardware-free testing. autoBind defaults apply —
- * per-device mapping config comes later (DESIGN.md §5.1).
+ * Owns the active input device + adapter, in priority order:
+ *
+ * <ol>
+ *   <li><b>Demo</b> (K key) — sine sweep, hardware-free testing.</li>
+ *   <li><b>Bridge</b> — when the native sidecar is running, its STATE stream
+ *       is the input AND the torque path (one device, one truth; on Windows
+ *       this replaces GLFW so FFB works out of the box). Auto-detected: a
+ *       cheap START probe goes out every couple of seconds until the sidecar
+ *       answers; if the sidecar dies mid-session the stale stream drops us
+ *       back to GLFW automatically.</li>
+ *   <li><b>GLFW</b> — any joystick Minecraft's own LWJGL can see (input only).</li>
+ *   <li>None — the link layer still drives via keyboard (W/S/A/D).</li>
+ * </ol>
  */
 public final class WheelInput {
 
     private static final int RESCAN_TICKS = 20;
+    private static final int BRIDGE_PROBE_TICKS = 40; // ~2 s between probes
+    private static final int BRIDGE_KEEPALIVE_TICKS = 100; // ~5 s, under the 10 s timeout
 
     private GlfwWheelDevice glfw;
     private DemoWheelDevice demo;
+    private BridgeWheelDevice bridge;
+    private boolean bridgeActive;
     private WheelAdapter adapter;
     private int rescanCooldown;
+    private int bridgeProbeCooldown;
+    private int bridgeKeepaliveCooldown;
 
-    /** Client tick (render thread — GLFW calls are legal here). */
-    public void tick() {
-        if (demo == null && (glfw == null || !glfw.present()) && --rescanCooldown <= 0) {
+    /**
+     * Client tick (render thread — GLFW calls are legal here).
+     *
+     * @param ffbStreaming true while the FFB loop is writing torque frames —
+     *                     they keep the sidecar session alive on their own;
+     *                     when idle, we send a periodic keepalive instead so
+     *                     the sidecar's client-silence timeout doesn't flap
+     *                     the connection.
+     */
+    public void tick(boolean ffbStreaming) {
+        if (demo == null) {
+            tickBridge(ffbStreaming);
+        }
+        if (demo == null && !bridgeActive
+                && (glfw == null || !glfw.present()) && --rescanCooldown <= 0) {
             rescanCooldown = RESCAN_TICKS;
             scan();
         }
-        if (demo == null && glfw != null && glfw.present()) {
+        if (demo == null && !bridgeActive && glfw != null && glfw.present()) {
             glfw.poll();
         }
         if (demo != null) {
@@ -35,6 +66,37 @@ public final class WheelInput {
         }
         if (adapter != null) {
             adapter.poll(1 / 20.0);
+        }
+    }
+
+    /** Sidecar auto-detection; prefers the bridge over GLFW while it's alive. */
+    private void tickBridge(boolean ffbStreaming) {
+        if (bridge == null) {
+            bridge = new BridgeWheelDevice(
+                    new InetSocketAddress("127.0.0.1", BridgeProtocol.DEFAULT_PORT),
+                    BridgeWheelDevice.Config.defaults());
+        }
+        boolean alive = bridge.connected();
+        if (!alive && --bridgeProbeCooldown <= 0) {
+            bridgeProbeCooldown = BRIDGE_PROBE_TICKS;
+            bridge.ffbStart(); // harmless UDP probe; the sidecar answers HELLO+STATE
+        }
+        if (alive && !ffbStreaming && --bridgeKeepaliveCooldown <= 0) {
+            bridgeKeepaliveCooldown = BRIDGE_KEEPALIVE_TICKS;
+            bridge.ffbStart(); // idle keepalive (never sent while torque streams)
+        }
+        if (alive != bridgeActive) {
+            bridgeActive = alive;
+            if (alive) {
+                adapter = WheelAdapter.autoBind(bridge);
+                AeronauticsSimwheel.LOGGER.info("SimWheel input: FFB bridge connected ({})",
+                        bridge.id());
+            } else {
+                adapter = glfw != null && glfw.present() ? WheelAdapter.autoBind(glfw) : null;
+                AeronauticsSimwheel.LOGGER.warn(
+                        "SimWheel input: FFB bridge lost, falling back to {}",
+                        adapter != null ? glfw.id() : "keyboard");
+            }
         }
     }
 
@@ -57,7 +119,8 @@ public final class WheelInput {
             AeronauticsSimwheel.LOGGER.info("SimWheel demo input ON");
         } else {
             demo = null;
-            adapter = (glfw != null && glfw.present()) ? WheelAdapter.autoBind(glfw) : null;
+            adapter = null;
+            bridgeActive = false; // re-detect naturally next tick
             AeronauticsSimwheel.LOGGER.info("SimWheel demo input OFF");
         }
     }
@@ -72,11 +135,22 @@ public final class WheelInput {
 
     /** The device torque writes should go to (null when nothing is attached). */
     public WheelDevice activeDevice() {
-        return demo != null ? demo : glfw;
+        if (demo != null) {
+            return demo;
+        }
+        return bridgeActive ? bridge : glfw;
     }
 
     public String label() {
-        WheelDevice d = activeDevice();
-        return d == null ? "no device (K = demo input)" : d.id();
+        if (demo != null) {
+            return demo.id();
+        }
+        if (bridgeActive) {
+            return bridge.id();
+        }
+        if (glfw != null && glfw.present()) {
+            return glfw.id();
+        }
+        return "keyboard (W/S/A/D; K = demo wheel)";
     }
 }
