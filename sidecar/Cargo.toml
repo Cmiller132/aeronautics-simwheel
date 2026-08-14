@@ -1,6 +1,6 @@
 [package]
 name = "simwheel-bridge"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "Native FFB bridge sidecar for Aeronautics SimWheel: speaks the AWFB UDP protocol, drives a PID wheelbase (MOZA R9 and friends) via DirectInput on Windows or evdev on Linux"
 license = "MIT"

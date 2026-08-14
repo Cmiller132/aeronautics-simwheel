@@ -21,13 +21,24 @@ import hashlib
 import io
 import json
 import os
+import re
 import sys
 import tarfile
 import urllib.parse
 import urllib.request
 import zipfile
 
-VERSION = '0.2.0'
+
+def _read_version() -> str:
+    """Single source of truth: gradle.properties `mod_version`."""
+    text = open('gradle.properties').read()
+    m = re.search(r'^mod_version=(\S+)$', text, re.M)
+    if not m:
+        raise SystemExit('mod_version not found in gradle.properties')
+    return m.group(1)
+
+
+VERSION = _read_version()
 MC = '1.21.1'
 NEOFORGE = '21.1.248'  # the version the gametest suite runs on
 USER_AGENT = f'aeronautics-simwheel-testkit/{VERSION} (github.com/Cmiller132/aeronautics-simwheel)'
@@ -227,22 +238,36 @@ def build_bridge_tarball(out_path: str) -> None:
 
 
 def main() -> None:
+    # Hard prerequisites — no kit without these.
     for prereq, hint in [(MOD_JAR, './gradlew :mod:build'),
-                         (SCHEMATIC, 'python tools/make_test_structures.py'),
-                         (SIDECAR_EXE, 'cd sidecar && cargo build --release'),
-                         (SIDECAR_LINUX,
-                          'wsl/linux: cd sidecar && CARGO_TARGET_DIR=target-linux '
-                          'cargo build --release')]:
+                         (SCHEMATIC, 'python tools/make_test_structures.py')]:
         if not os.path.exists(prereq):
             raise SystemExit(f'missing {prereq} — run: {hint}')
     os.makedirs('dist', exist_ok=True)
     print('building mrpack (querying Modrinth for pinned versions)...')
     build_mrpack(f'dist/simwheel-testkit-{VERSION}.mrpack')
-    print('building FFB bridge zip...')
-    build_bridge_zip(f'dist/simwheel-ffb-bridge-{VERSION}-windows.zip')
-    print('building FFB bridge Linux tarball...')
-    build_bridge_tarball(f'dist/simwheel-ffb-bridge-{VERSION}-linux-x86_64.tar.gz')
-    print('done — release assets in dist/')
+
+    # Bridge bundles need per-OS binaries that can only be built on (or for)
+    # that OS. Skip what's missing: a release cut from a machine without the
+    # toolchains carries the previous release's bundles forward instead
+    # (protocol-stable — see docs/RELEASING.md).
+    skipped = []
+    if os.path.exists(SIDECAR_EXE):
+        print('building FFB bridge zip...')
+        build_bridge_zip(f'dist/simwheel-ffb-bridge-{VERSION}-windows.zip')
+    else:
+        skipped.append(f'windows bridge (missing {SIDECAR_EXE} — '
+                       'cd sidecar && cargo build --release)')
+    if os.path.exists(SIDECAR_LINUX):
+        print('building FFB bridge Linux tarball...')
+        build_bridge_tarball(f'dist/simwheel-ffb-bridge-{VERSION}-linux-x86_64.tar.gz')
+    else:
+        skipped.append(f'linux bridge (missing {SIDECAR_LINUX} — wsl/linux: '
+                       'cd sidecar && CARGO_TARGET_DIR=target-linux cargo build --release)')
+    for s in skipped:
+        print(f'SKIPPED {s}')
+    print('done — release assets in dist/'
+          + (' (bridge bundles incomplete, see SKIPPED above)' if skipped else ''))
 
 
 if __name__ == '__main__':
