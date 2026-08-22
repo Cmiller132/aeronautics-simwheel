@@ -39,11 +39,18 @@ public final class RaceCarFfbSim {
         this.rightLane = rightLane;
     }
 
+    /** One substep's column torque, split the way the telemetry frame carries it. */
+    public record SubstepTorques(double satNm, double textureNm) {
+        public double totalNm() {
+            return satNm + textureNm;
+        }
+    }
+
     /**
-     * One physics substep. Returns the steering-column torque in Nm
-     * (positive = clockwise from the driver's view).
+     * One physics substep. Column torques in Nm (positive = clockwise from the
+     * driver's view), split into self-aligning and texture components.
      */
-    public double substep(double dt, double speedMs, double steerColumnDeg) {
+    public SubstepTorques substep(double dt, double speedMs, double steerColumnDeg) {
         x += speedMs * dt;
 
         left.step(dt, leftLane.height(x), leftLane.blockHeight(x), speedMs);
@@ -52,19 +59,26 @@ public final class RaceCarFfbSim {
         double roadWheelRad = Math.toRadians(steerColumnDeg / STEER_RATIO);
         double slipRad = roadWheelRad * SLIP_FRACTION;
 
-        double kingpinL = kingpinNm(left, slipRad, +1);
-        double kingpinR = kingpinNm(right, slipRad, -1);
+        double sat = satNm(left, slipRad) + satNm(right, slipRad);
+        // Seam strikes reflect through the scrub radius with opposite lever
+        // arms per side — right-side events positive (clockwise), matching
+        // the frame/strike convention.
+        double texture = right.strikeN() * SCRUB_M - left.strikeN() * SCRUB_M;
 
-        // Reflect both kingpins to the column through the linkage
-        return (kingpinL + kingpinR) / STEER_RATIO * PROFILE_GAIN;
+        double toColumn = PROFILE_GAIN / STEER_RATIO;
+        return new SubstepTorques(sat * toColumn, texture * toColumn);
     }
 
-    private static double kingpinNm(QuarterCarWheel wheel, double slipRad, int strikeSign) {
+    /** Steered-axle slip proxy for the telemetry frame (|v_side|/|v_forward| ≈ tan α). */
+    public double slipProxy(double steerColumnDeg) {
+        double roadWheelRad = Math.toRadians(Math.abs(steerColumnDeg) / STEER_RATIO);
+        return Math.tan(roadWheelRad * SLIP_FRACTION);
+    }
+
+    private static double satNm(QuarterCarWheel wheel, double slipRad) {
         double fz = wheel.loadN();
         double fy = clamp(CORNERING_STIFF_N_PER_RAD * slipRad, FRICTION_MU * fz);
-        double sat = -fy * TRAIL_M;                        // aligns against the steer
-        double strike = strikeSign * wheel.strikeN() * SCRUB_M;
-        return sat + strike;
+        return -fy * TRAIL_M; // aligns against the steer
     }
 
     public double positionM() {

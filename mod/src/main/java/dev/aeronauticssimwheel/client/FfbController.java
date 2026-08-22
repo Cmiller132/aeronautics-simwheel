@@ -55,6 +55,11 @@ public final class FfbController {
         service.stop();
     }
 
+    /** Shutdown hook: stop and give the loop a moment to detach the device. */
+    public void stopAndJoin(long millis) {
+        service.stopAndJoin(millis);
+    }
+
     /** Game thread, once per client tick: publish inputs for the FFB thread. */
     public void updateFromGame(Minecraft mc, WheelInput input, SimWheelLink link) {
         boolean engaged = link.isEngaged();
@@ -89,14 +94,14 @@ public final class FfbController {
     // ------------------------------------------------------------------
 
     public void onTelemetry(FfbTelemetryPacket packet) {
-        float[] torques = packet.torqueNm();
+        var frames = packet.frames();
         float[] offsets = packet.offsetsS();
-        if (torques.length == 0 || torques.length != offsets.length
+        if (frames.length == 0 || frames.length != offsets.length
                 || !Double.isFinite(packet.baseTimeS())) {
             return;
         }
-        for (int i = 0; i < torques.length; i++) {
-            pipeline.postTelemetry(packet.baseTimeS() + offsets[i], torques[i]);
+        for (int i = 0; i < frames.length; i++) {
+            pipeline.postTelemetry(packet.baseTimeS() + offsets[i], frames[i]);
         }
         pipeline.noteTelemetryBatch(packet.baseTimeS() + offsets[offsets.length - 1],
                 System.nanoTime() / 1e9);
@@ -126,6 +131,36 @@ public final class FfbController {
     /** Reconstructed telemetry torque currently in the mix (HUD). */
     public float lastTelemetryNm() {
         return pipeline.lastComponents().telemetryNm();
+    }
+
+    /** Full mix breakdown (HUD component bars). */
+    public FfbPipeline.Components lastComponents() {
+        return pipeline.lastComponents();
+    }
+
+    /** Last reconstructed frame — speed/slip/μ/rpm context (HUD). */
+    public dev.aeronauticssimwheel.ffb.TelemetryFrame lastFrame() {
+        return pipeline.lastFrame();
+    }
+
+    /** Current telemetry playback delay, seconds (HUD). */
+    public double playbackDelayS() {
+        return pipeline.playbackDelayS();
+    }
+
+    /** Commissioning test signals: cycle NONE → SWEEP → STEP → NONE (keybind). */
+    public FfbPipeline.TestSignal cycleTestSignal() {
+        FfbPipeline.TestSignal next = switch (pipeline.testSignal()) {
+            case NONE -> FfbPipeline.TestSignal.SWEEP;
+            case SWEEP -> FfbPipeline.TestSignal.STEP;
+            case STEP -> FfbPipeline.TestSignal.NONE;
+        };
+        pipeline.setTestSignal(next);
+        return next;
+    }
+
+    public FfbPipeline.TestSignal testSignal() {
+        return pipeline.testSignal();
     }
 
     /** True while telemetry playback is serving stale/faded data (HUD). */

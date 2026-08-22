@@ -21,6 +21,10 @@ public final class SimWheelClient {
     public static final KeyMapping KEY_DEMO = new KeyMapping(
             "key.aeronautics_simwheel.demo", InputConstants.Type.KEYSYM,
             InputConstants.KEY_K, "key.categories.aeronautics_simwheel");
+    /** Commissioning: cycle the FFB test signal (off → sweep → step → off). */
+    public static final KeyMapping KEY_TEST_SIGNAL = new KeyMapping(
+            "key.aeronautics_simwheel.test_signal", InputConstants.Type.KEYSYM,
+            InputConstants.KEY_L, "key.categories.aeronautics_simwheel");
 
     private static WheelInput input;
     private static SimWheelLink link;
@@ -49,6 +53,7 @@ public final class SimWheelClient {
         modBus.addListener((RegisterKeyMappingsEvent e) -> {
             e.register(KEY_ENGAGE);
             e.register(KEY_DEMO);
+            e.register(KEY_TEST_SIGNAL);
         });
         modBus.addListener((RegisterGuiLayersEvent e) -> e.registerAboveAll(
                 ResourceLocation.fromNamespaceAndPath(AeronauticsSimwheel.MOD_ID, "hud"),
@@ -63,11 +68,17 @@ public final class SimWheelClient {
         });
 
         ffb.start();
+        // The client README promises this: never leave the loop thread's device
+        // attached on JVM exit (the daemon thread would otherwise just die; the
+        // sidecar watchdog is the backstop, not the plan).
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(() -> ffb.stopAndJoin(200), "simwheel-ffb-shutdown"));
     }
 
     private static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
         feel.tick();
+        input.setBindings(feel.bindings());
         input.tick(link.isEngaged());
 
         while (KEY_DEMO.consumeClick()) {
@@ -75,6 +86,13 @@ public final class SimWheelClient {
         }
         while (KEY_ENGAGE.consumeClick()) {
             link.toggleEngage(mc, input);
+        }
+        while (KEY_TEST_SIGNAL.consumeClick()) {
+            var mode = ffb.cycleTestSignal();
+            if (mc.player != null) {
+                mc.player.displayClientMessage(net.minecraft.network.chat.Component.literal(
+                        "SimWheel test signal: " + mode), true);
+            }
         }
 
         if (mc.level != null) {

@@ -16,9 +16,10 @@ behavior change; these can.
 | `race_car_assembles_into_physics_craft` | The bundled race-car structure assembles into a live Sable physics body and survives simulation. |
 | `race_car_emits_ground_telemetry` | End to end: the sim wheel drives the car's own link steering, the craft is shoved into side-slip, and the telemetry rig emits finite, bounded, nonzero column torque at substep rate — and goes dead after the input timeout. Also asserts `fullFidelity()` (the S8 reflective reads still resolve). |
 | `mount_linking_gives_float_steering` | The mixin, A/B: the same mount unlinked (stock, yaw 0) then linked chases 0.5·π/6 ≈ 0.2618 rad — strictly between the two nearest integer-signal yaws, so only the float path can produce it. |
+| `prebaked_mount_links_register_on_load` | The shareable schematic's NBT contract: `LinkedMounts` (BlockPos.asLong offsets, exactly what `make_test_structures.py` bakes) registers the front mounts on load, lands on real mounts, and `FfbTrim` loads with it. |
 
 Plus `HealthCheck` runs at server startup — the log must show
-`all 7 integration surfaces verified`.
+`all 11 integration surfaces verified`.
 
 ## Writing more tests — the sharp edges
 

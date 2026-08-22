@@ -10,9 +10,72 @@ pub struct WheelState {
     pub fault: bool,
 }
 
+/// MOZA Racing's USB vendor id — shared by both platform backends (evdev
+/// reads it from EVIOCGID, DirectInput from DIPROP_VIDPID).
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub const MOZA_VID: u16 = 0x346e;
+/// Simagic's own vendor id (EVO-era bases, 2025+). Older Simagic bases
+/// enumerate under STMicroelectronics 0x0483 with the shared pid 0x0522.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub const SIMAGIC_VID: u16 = 0x3670;
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub const SIMAGIC_LEGACY_VID: u16 = 0x0483;
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub const SIMAGIC_LEGACY_PID: u16 = 0x0522;
+
+/// USB id → rated torque, the preferred resolution path on both platforms
+/// (names are localizable and driver-dependent; ids are not). Never guess
+/// when ids are shared across ratings:
+/// - MOZA R16 and R21 share product ids (0x0000 first-gen, 0x0010
+///   second-gen). Second-generation ids per the kernel's hid-ids.h.
+/// - Simagic Alpha EVO bases (0x3670:0x0500..0x0502) — public sources
+///   CONFLICT on which pid is which model (PCGamingWiki: Sport+EVO=0x0500,
+///   Pro=0x0501, Ultra=0x0502; linux-steering-wheels: EVO=0x0501,
+///   Pro=0x0502), and Sport (9 Nm) vs EVO (12 Nm) share a pid and a device
+///   name either way. All fall through to `--rated-torque`.
+/// - Legacy Simagic (0x0483:0x0522) is shared by M10/Alpha Mini/Alpha/
+///   Alpha Ultimate — same story.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn rated_by_usb_id(vendor: u16, product: u16) -> Option<f32> {
+    if vendor != MOZA_VID {
+        return None;
+    }
+    match product {
+        0x0002 | 0x0012 => Some(9.0),  // R9 (gen 1 / gen 2)
+        0x0004 | 0x0014 => Some(5.5),  // R5
+        0x0005 | 0x0015 => Some(3.9),  // R3
+        0x0006 | 0x0016 => Some(12.0), // R12
+        _ => None,
+    }
+}
+
+/// True when the USB id says "a Simagic wheelbase" — recognized, but the
+/// rating still must come from `--rated-torque` (ids/names are shared
+/// across ratings; see `rated_by_usb_id`). Backends use this to produce
+/// the tailored error below instead of the generic one.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn is_simagic_usb_id(vendor: u16, product: u16) -> bool {
+    vendor == SIMAGIC_VID || (vendor == SIMAGIC_LEGACY_VID && product == SIMAGIC_LEGACY_PID)
+}
+
+/// The exact fix for a recognized-but-ambiguous Simagic base.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn simagic_rated_torque_error(name: &str) -> String {
+    format!(
+        "Simagic wheelbase '{name}': Simagic bases share USB ids and device names \
+         across torque ratings (Alpha EVO Sport 9 / EVO 12 / EVO Pro 18 / EVO \
+         Ultra 28 Nm; legacy Alpha family likewise), so the rating cannot be \
+         auto-detected. Pass --rated-torque <Nm> for YOUR base (e.g. \
+         --rated-torque 9 for an Alpha EVO Sport). Also set SimPro Manager's \
+         force-feedback gain to 100% — it rescales all game torque, and any \
+         other value breaks the Nm calibration this flag establishes."
+    )
+}
+
 /// Rated torque resolution shared by the platform backends: explicit flag
 /// wins; known MOZA R-series names carry vendor numbers; anything else must
 /// be told (a wrong rating rescales every Nm cap in the whole chain).
+/// Backends prefer `rated_by_usb_id` and use this as the name fallback.
 /// (cfg: only the real-device backends call this — sim-only platforms like
 /// macOS otherwise flag it dead; tests still cover it everywhere.)
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -29,10 +92,29 @@ pub fn resolve_rated_nm(name: &str, explicit: Option<f32>) -> Result<f32, String
             return Ok(nm);
         }
     }
+    if n.contains("simagic") || n.contains("alpha evo") {
+        return Err(simagic_rated_torque_error(name));
+    }
     Err(format!(
         "unknown wheelbase '{name}': pass --rated-torque <Nm> (the base's rated \
          maximum) so torque caps scale correctly"
     ))
+}
+
+/// Name fallback with USB-id context: same as `resolve_rated_nm`, but a
+/// Simagic USB id upgrades the generic unknown-wheelbase error to the
+/// tailored Simagic one even when the localized device name says nothing.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+pub fn resolve_rated_nm_with_usb_id(
+    name: &str,
+    vendor: u16,
+    product: u16,
+    explicit: Option<f32>,
+) -> Result<f32, String> {
+    if explicit.is_none() && is_simagic_usb_id(vendor, product) {
+        return Err(simagic_rated_torque_error(name));
+    }
+    resolve_rated_nm(name, explicit)
 }
 
 pub trait FfbDevice {
@@ -175,5 +257,53 @@ mod tests {
         assert!(resolve_rated_nm("Some Unknown Wheel", None).is_err());
         // "moza" alone must not match — the model number carries the rating.
         assert!(resolve_rated_nm("MOZA mystery base", None).is_err());
+    }
+
+    /// Simagic bases are RECOGNIZED but never rated automatically: the EVO
+    /// family shares pids and one device name across 9/12/18/28 Nm models
+    /// (and public pid tables conflict), and the legacy 0x0483:0x0522 pid is
+    /// shared by four bases. The error must hand the operator the exact fix.
+    #[test]
+    fn simagic_is_recognized_but_never_guessed() {
+        assert!(is_simagic_usb_id(SIMAGIC_VID, 0x0500)); // Alpha EVO Sport (and EVO?)
+        assert!(is_simagic_usb_id(SIMAGIC_VID, 0x0501));
+        assert!(is_simagic_usb_id(SIMAGIC_VID, 0x0502));
+        assert!(is_simagic_usb_id(SIMAGIC_LEGACY_VID, SIMAGIC_LEGACY_PID));
+        assert!(!is_simagic_usb_id(SIMAGIC_LEGACY_VID, 0x5740)); // other STM device
+        assert_eq!(rated_by_usb_id(SIMAGIC_VID, 0x0500), None);
+
+        let by_name = resolve_rated_nm("SIMAGIC Alpha EVO Wheelbase", None).unwrap_err();
+        assert!(by_name.contains("--rated-torque") && by_name.contains("SimPro"),
+                "tailored error must name the fix: {by_name}");
+
+        // A localized/blank name still gets the tailored error via the usb id.
+        let by_id = resolve_rated_nm_with_usb_id("??", SIMAGIC_VID, 0x0500, None).unwrap_err();
+        assert!(by_id.contains("--rated-torque") && by_id.contains("Simagic"));
+        // Explicit rating always wins, id or not.
+        assert_eq!(resolve_rated_nm_with_usb_id("??", SIMAGIC_VID, 0x0500, Some(9.0)), Ok(9.0));
+        // Non-Simagic ids keep the generic path.
+        assert!(resolve_rated_nm_with_usb_id("??", 0x046d, 0xc262, None).is_err());
+        assert_eq!(resolve_rated_nm_with_usb_id("MOZA R5", 0, 0, None), Ok(5.5));
+    }
+
+    /// The shared VID/PID table (both backends resolve through this — evdev
+    /// via EVIOCGID, DirectInput via DIPROP_VIDPID).
+    #[test]
+    fn moza_usb_id_table() {
+        // Gen 1
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0002), Some(9.0));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0004), Some(5.5));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0005), Some(3.9));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0006), Some(12.0));
+        // Gen 2 (kernel hid-ids.h)
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0012), Some(9.0));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0014), Some(5.5));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0015), Some(3.9));
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0016), Some(12.0));
+        // R16 and R21 share ids in BOTH generations — must NOT be guessed.
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0000), None);
+        assert_eq!(rated_by_usb_id(MOZA_VID, 0x0010), None);
+        // Foreign vendor never matches, even on a known product id.
+        assert_eq!(rated_by_usb_id(0x046d, 0x0002), None);
     }
 }

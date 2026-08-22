@@ -43,12 +43,24 @@ public final class SimWheelHud implements LayeredDraw.Layer {
                     link.commandedDeg(mc), Float.isNaN(game) ? 0f : game, link.lockDeg(mc)),
                     4, y, 0xFFFFFFFF);
             y += 10;
-            g.drawString(mc.font, String.format("FFB %+.2f Nm [%s]",
-                    ffb.lastOutputNm(), ffb.safetyState()), 4, y, 0xFFFFD080);
+            String test = ffb.testSignal() != dev.aeronauticssimwheel.ffb.FfbPipeline.TestSignal.NONE
+                    ? "  TEST:" + ffb.testSignal() : "";
+            g.drawString(mc.font, String.format("FFB %+.2f Nm [%s]%s",
+                    ffb.lastOutputNm(), ffb.safetyState(), test), 4, y, 0xFFFFD080);
             y += 10;
-            g.drawString(mc.font, String.format("telemetry %+.2f Nm [%s]",
-                    ffb.lastTelemetryNm(), ffb.telemetryStale() ? "stale" : "live"),
+            var c = ffb.lastComponents();
+            g.drawString(mc.font, String.format(
+                    "sat %+.2f tex %+.2f syn %+.2f rum %+.2f dmp %+.2f fric %+.2f imp %+.2f lock %+.2f",
+                    c.satNm(), c.textureNm(), c.synthNm(), c.rumbleNm(),
+                    c.damperNm(), c.frictionNm(), c.impulseNm(), c.lockNm()),
                     4, y, 0xFF80D0FF);
+            y += 10;
+            var frame = ffb.lastFrame();
+            g.drawString(mc.font, String.format(
+                    "%s | v %.1f m/s slip %.2f μ %.2f rpm %.0f | delay %.0f ms",
+                    ffb.telemetryStale() ? "telemetry STALE" : "telemetry live",
+                    frame.speedMS(), frame.slip(), frame.mu(), frame.driveRpm(),
+                    ffb.playbackDelayS() * 1000), 4, y, 0xFF80D0FF);
             y += 10;
             var stats = ffb.loopStats();
             var tuning = ffb.tuning();

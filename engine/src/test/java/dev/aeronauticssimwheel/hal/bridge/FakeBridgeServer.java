@@ -28,6 +28,7 @@ public final class FakeBridgeServer implements AutoCloseable {
     public final List<Torque> torques = new CopyOnWriteArrayList<>();
     public final List<Frame> control = new CopyOnWriteArrayList<>(); // START/STOP/PANIC
     public final AtomicBoolean silent = new AtomicBoolean(false);
+    public final AtomicBoolean armed = new AtomicBoolean(true);
 
     private final DatagramChannel channel;
     private final Thread thread;
@@ -66,8 +67,10 @@ public final class FakeBridgeServer implements AutoCloseable {
         if (to == null || silent.get()) {
             return;
         }
+        int flags = BridgeProtocol.FLAG_CONNECTED
+                | (armed.get() ? BridgeProtocol.FLAG_ARMED : 0);
         send(new State(seq.incrementAndGet(), steeringDeg, steeringVelDegPerS,
-                0, BridgeProtocol.FLAG_CONNECTED, 42), to);
+                0, flags, 42), to);
     }
 
     private void loop() {
@@ -87,7 +90,8 @@ public final class FakeBridgeServer implements AutoCloseable {
                         case Start s -> {
                             control.add(s);
                             if (!silent.get()) {
-                                send(new Hello(seq.incrementAndGet(), 9.0f, "Fake MOZA R9"), from);
+                                send(new Hello(seq.incrementAndGet(), 9.0f, 1080f,
+                                        "Fake MOZA R9"), from);
                             }
                         }
                         case Panic p -> control.add(p);

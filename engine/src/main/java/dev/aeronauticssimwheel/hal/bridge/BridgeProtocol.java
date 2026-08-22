@@ -20,7 +20,8 @@ import java.util.Optional;
 public final class BridgeProtocol {
 
     public static final int MAGIC = 'A' | 'W' << 8 | 'F' << 16 | 'B' << 24;
-    public static final byte VERSION = 1;
+    /** v2: HELLO carries range_deg; STATE gains FLAG_ARMED. Hard-matched. */
+    public static final byte VERSION = 2;
     public static final int DEFAULT_PORT = 46910;
     public static final int MAX_FRAME_BYTES = 64;
 
@@ -37,6 +38,8 @@ public final class BridgeProtocol {
     public static final int FLAG_CONNECTED = 1;
     public static final int FLAG_FAULT = 2;
     public static final int FLAG_HANDS_OFF = 4;
+    /** The bridge would currently accept TORQUE (started, no latch, socket clean). */
+    public static final int FLAG_ARMED = 8;
 
     private static final int HEADER_BYTES = 4 + 1 + 1 + 4;
 
@@ -64,8 +67,10 @@ public final class BridgeProtocol {
                         int buttons, int flags, int deviceIdHash) implements Frame {
     }
 
-    /** Bridge → mod on connect/START. */
-    public record Hello(int sequence, float ratedTorqueNm, String deviceName) implements Frame {
+    /** Bridge → mod on connect/START. rangeDeg = the sidecar's --range setting,
+     *  so both ends scale the reported angle identically (v2). */
+    public record Hello(int sequence, float ratedTorqueNm, float rangeDeg,
+                        String deviceName) implements Frame {
     }
 
     private BridgeProtocol() {
@@ -89,6 +94,7 @@ public final class BridgeProtocol {
             }
             case Hello h -> {
                 buf.putFloat(h.ratedTorqueNm());
+                buf.putFloat(h.rangeDeg());
                 byte[] name = h.deviceName().getBytes(StandardCharsets.UTF_8);
                 int len = Math.min(name.length, 32);
                 buf.put((byte) len);
@@ -123,13 +129,15 @@ public final class BridgeProtocol {
                         buf.getInt(), Byte.toUnsignedInt(buf.get()), buf.getInt()));
                 case TYPE_HELLO -> {
                     float rated = buf.getFloat();
+                    float range = buf.getFloat();
                     int len = Byte.toUnsignedInt(buf.get());
                     if (len > buf.remaining() || len > 32) {
                         yield Optional.empty();
                     }
                     byte[] name = new byte[len];
                     buf.get(name);
-                    yield Optional.of(new Hello(seq, rated, new String(name, StandardCharsets.UTF_8)));
+                    yield Optional.of(new Hello(seq, rated, range,
+                            new String(name, StandardCharsets.UTF_8)));
                 }
                 default -> Optional.empty();
             };

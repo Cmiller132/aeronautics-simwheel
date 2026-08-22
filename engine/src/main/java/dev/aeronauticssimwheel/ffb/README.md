@@ -7,7 +7,7 @@ Two classes are the spine; the rest are the components they compose.
 
 | File | Role |
 |---|---|
-| `FfbPipeline.java` | **The one shipping composition** (DESIGN.md §6.5): telemetry + soft lock + damper/friction + strike impulses → soft-knee mixer → SafetyChain. The mod, the unit tests, and the sim harness all run this exact class. Owns ingress hygiene (clamps/drops hostile values), the server↔client clock mapping (EMA offset), engage/disengage edges, and tuning swaps. FAULT survives everything except a deliberate disengage → re-engage. |
+| `FfbPipeline.java` | **The one shipping composition** (DESIGN.md §6.5): component telemetry (SAT × understeer trail collapse + differential texture) + surface/drivetrain synthesis + speed-scaled damper/parking friction + strike impulses → soft-knee mixer (soft lock added OUTSIDE the knee) → SafetyChain. The mod, the unit tests, and the sim harness all run this exact class. Owns ingress hygiene, the server↔client clock mapping (EMA offset) + adaptive playback delay, engage/disengage edges, tuning swaps, and the commissioning test signals (sweep/step through the live chain). FAULT survives everything except a deliberate disengage → re-engage. |
 | `FfbService.java` | **The 250 Hz loop** (DESIGN.md §3): dedicated daemon thread, absolute-deadline `parkNanos` pacing with rolling jitter stats, device lifecycle (attach/detach/panic), and input-source selection — prefers a `HardwareAngleSource` (bridge STATE) over the game-tick snapshot. All math delegates to `FfbPipeline`. `runOnce()` is package-private so tests drive the loop deterministically. |
 | `FfbTuning.java` | Every feel + safety gain in one immutable record, `sanitized()` range-clamps on construction. Loaded from the hot-reload TOML by the mod; built directly by tests/harness. Swapped atomically between steps; safety-parameter changes re-ramp from zero. |
 
@@ -15,14 +15,17 @@ Two classes are the spine; the rest are the components they compose.
 
 | File | Role |
 |---|---|
-| `TelemetryBuffer.java` | Reconstructs the 40+ Hz torque signal from 20 Hz packets: 75 ms delayed interpolation, ≤100 ms extrapolation on gaps, then fade to zero — never hold a stale torque. |
-| `EventImpulses.java` | Renders strike events (curbs, landings) as exponentially decaying impulses — the low-latency path around the telemetry batch. Bounded queue, clamped peaks. |
+| `TelemetryFrame.java` | The wire sample: SAT (at reference trail), differential texture, speed, slip proxy, μ, drive RPM. Torque channels fade/ramp; context channels hold (consumers gate on staleness). Ingress clamps live here. |
+| `TelemetryBuffer.java` | Multi-channel reconstruction of the 40+ Hz frame stream from 20 Hz packets: delayed interpolation (adaptive 25–150 ms from measured batch jitter, or pinned via config), ≤100 ms extrapolation on gaps, then fade to zero — never hold a stale torque. |
+| `EventImpulses.java` | Renders strike/collision events as exponentially decaying impulses — the low-latency path around the telemetry batch. Bounded queue, clamped peaks. |
 | `SoftLock.java` | The end stop at ±lock: zero inside the range, stiff spring + one-way damper past it. Deliberately stiff so the SafetyChain clamp saturates — the stop feels like a wall at the user's own torque ceiling. |
-| `FeelEffects.java` | Baseline damper + friction so the wheel never feels dead. Stateless, Nm out. |
-| `Mixer.java` / `SoftKnee.java` | Sum in Nm, then compress above the knee (65 % of the clamp, 3:1) so heavy loading stays proportional instead of hitting the clamp wall. |
-| `SafetyChain.java` | **The last stage, unbypassable** (DESIGN.md §7): master gain + ramp-in → watchdog (fade, never freeze) → clamp → slew limit → panic/FAULT latch. Property-tested invariants. |
-| `GroundTorqueModel.java` | Server-side: reflects per-mount tire lateral force into one signed column torque (kingpin trail × steering ratio). Fed by the mod's `GroundTelemetrySampler`; owns the game-units→Nm gain. |
-| `StrikeDetector.java` | Server-side: suspension-compression spikes → immediate event packets (threshold + hysteresis + min-interval, peak-capped). |
+| `FeelEffects.java` | Damper (speed-scaled with a floor) + friction (parking boost at standstill, baseline while rolling) so the wheel never feels dead. Stateless, Nm out. |
+| `SurfaceTexture.java` | Client synth: continuous road texture keyed to μ class + speed (gravel granular, firm faint, ice glassy-silent) — the sampled bump path aliases block seams at speed; this renders the surface honestly at loop rate. Seeded, deterministic. |
+| `DrivetrainRumble.java` | Client synth: subtle periodic hum keyed to wheel-mount kinetic RPM. |
+| `Mixer.java` / `SoftKnee.java` | Sum feel in Nm, compress above the knee (65 % of the clamp, 3:1) so heavy loading stays proportional — then add the soft lock OUTSIDE the knee (an end stop is a wall, not compressed). |
+| `SafetyChain.java` | **The last stage, unbypassable** (DESIGN.md §7): master gain + ramp-in → watchdog (fade, never freeze) → clamp → slew limit (300 Nm/s default — sim-grade; transients need hundreds of Nm/s) → panic/FAULT latch. Property-tested invariants. |
+| `GroundTorqueModel.java` | Server-side: reflects per-mount tire forces into one `TelemetryFrame` per substep — SAT via kingpin trail × steering ratio, side-signed differential texture (square-on bumps cancel), slip proxy, min-μ, max-RPM. Fed by the mod's `GroundTelemetrySampler`; owns the game-units→Nm gain; per-block trim multiplies torque channels. |
+| `StrikeDetector.java` | Server-side: suspension-compression spikes → immediate event packets, **signed by originating side** (threshold + hysteresis + min-interval, peak-capped). |
 
 ## Parked (deliberately kept, not composed)
 

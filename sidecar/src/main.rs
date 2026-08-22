@@ -1,9 +1,10 @@
 //! simwheel-bridge — native FFB sidecar for Aeronautics SimWheel.
 //!
 //! Speaks the AWFB UDP protocol (DESIGN.md §6.6) on localhost and drives a
-//! force-feedback wheelbase (MOZA R9 or any FFB wheel) — DirectInput on
-//! Windows, kernel evdev on Linux. No vendor SDK: the R9 is a standard PID
-//! force-feedback device on both.
+//! force-feedback wheelbase (MOZA R-series, Simagic Alpha EVO with
+//! `--rated-torque`, or any PID FFB wheel) — DirectInput on Windows, kernel
+//! evdev on Linux. No vendor SDK: these are standard PID force-feedback
+//! devices on both.
 //!
 //! Modes:
 //!   simwheel-bridge --list           enumerate FFB-capable devices, exit
@@ -11,12 +12,13 @@
 //!   simwheel-bridge [--device N]     drive a real wheel (default: first FFB)
 //!
 //! Options: --port <udp port> (default 46910), --max-torque <Nm> (bridge-side
-//! hard ceiling, default 5.0), --range <deg> (wheel rotation range as set in
-//! the vendor tool, default 1080), --rated-torque <Nm> (the base's rated
-//! maximum — required for wheelbases the sidecar doesn't recognize),
-//! --ack-autocenter (proceed despite an un-disableable device autocenter),
-//! --invert-ffb (flip torque sign — for platform/firmware combinations with
-//! reversed polarity), --verbose.
+//! hard ceiling, default 5.0), --max-slew <Nm/s> (output slew limit, default
+//! 500 — zeroing paths bypass it), --range <deg> (wheel rotation range as set
+//! in the vendor tool, default 1080; reported to the mod in HELLO),
+//! --rated-torque <Nm> (the base's rated maximum — required for wheelbases
+//! the sidecar doesn't recognize), --ack-autocenter (proceed despite an
+//! un-disableable device autocenter), --invert-ffb (flip torque sign — for
+//! platform/firmware combinations with reversed polarity), --verbose.
 
 mod bridge;
 mod device;
@@ -26,7 +28,7 @@ mod dinput;
 #[cfg(target_os = "linux")]
 mod evdev;
 
-use bridge::{Bridge, Tick, DEFAULT_MAX_TORQUE_NM, STATE_HZ};
+use bridge::{Bridge, Tick, DEFAULT_MAX_SLEW_NM_PER_S, DEFAULT_MAX_TORQUE_NM, DEFAULT_RANGE_DEG, STATE_HZ};
 use device::FfbDevice;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,6 +45,7 @@ struct Args {
     device_index: usize,
     port: u16,
     max_torque_nm: f32,
+    max_slew_nm_per_s: f32,
     range_deg: f32,
     rated_torque_nm: Option<f32>,
     ack_autocenter: bool,
@@ -57,7 +60,8 @@ fn parse_args() -> Args {
         device_index: 0,
         port: protocol::DEFAULT_PORT,
         max_torque_nm: DEFAULT_MAX_TORQUE_NM,
-        range_deg: 1080.0,
+        max_slew_nm_per_s: DEFAULT_MAX_SLEW_NM_PER_S,
+        range_deg: DEFAULT_RANGE_DEG,
         rated_torque_nm: None,
         ack_autocenter: false,
         invert_ffb: false,
@@ -90,6 +94,7 @@ fn parse_args() -> Args {
                     .unwrap_or_else(|| die("--port needs an integer in 1..=65535"));
             }
             "--max-torque" => args.max_torque_nm = num("--max-torque") as f32,
+            "--max-slew" => args.max_slew_nm_per_s = num("--max-slew") as f32,
             "--range" => args.range_deg = num("--range") as f32,
             "--rated-torque" => args.rated_torque_nm = Some(num("--rated-torque") as f32),
             "--ack-autocenter" => args.ack_autocenter = true,
@@ -105,6 +110,9 @@ fn parse_args() -> Args {
     // A wheelbase can hurt you; refuse silly numbers rather than obey them.
     if !(0.0..=25.0).contains(&args.max_torque_nm) {
         die("--max-torque must be within 0..=25 Nm");
+    }
+    if !(10.0..=10000.0).contains(&args.max_slew_nm_per_s) {
+        die("--max-slew must be within 10..=10000 Nm/s");
     }
     if !(90.0..=2880.0).contains(&args.range_deg) {
         die("--range must be within 90..=2880 degrees");
@@ -158,6 +166,8 @@ fn main() {
             socket,
             device::SimDevice::new(),
             args.max_torque_nm,
+            args.range_deg,
+            args.max_slew_nm_per_s,
             args.verbose,
         );
         bridge.set_invert(args.invert_ffb);
@@ -177,7 +187,14 @@ fn main() {
                 dev.name(),
                 dev.rated_torque_nm()
             );
-            let mut bridge = Bridge::new(socket, dev, args.max_torque_nm, args.verbose);
+            let mut bridge = Bridge::new(
+                socket,
+                dev,
+                args.max_torque_nm,
+                args.range_deg,
+                args.max_slew_nm_per_s,
+                args.verbose,
+            );
             bridge.set_invert(args.invert_ffb);
             run(bridge);
         }
@@ -195,7 +212,14 @@ fn main() {
                 dev.name(),
                 dev.rated_torque_nm()
             );
-            let mut bridge = Bridge::new(socket, dev, args.max_torque_nm, args.verbose);
+            let mut bridge = Bridge::new(
+                socket,
+                dev,
+                args.max_torque_nm,
+                args.range_deg,
+                args.max_slew_nm_per_s,
+                args.verbose,
+            );
             bridge.set_invert(args.invert_ffb);
             run(bridge);
         }

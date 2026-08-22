@@ -52,6 +52,7 @@ PINNED = [
 
 MOD_JAR = f'mod/build/libs/aeronautics-simwheel-{VERSION}.jar'
 SCHEMATIC = 'schematics/simwheel_race_car.nbt'
+TRACK = 'schematics/simwheel_feature_track.nbt'
 SIDECAR_EXE = 'sidecar/target/release/simwheel-bridge.exe'
 SIDECAR_LINUX = 'sidecar/target-linux/release/simwheel-bridge'
 
@@ -69,6 +70,25 @@ echo then check BRIDGE-README.txt.
 pause
 """
 
+BRIDGE_BAT_SIMAGIC = """@echo off
+title SimWheel FFB Bridge (Simagic Alpha EVO Sport, 9 Nm)
+echo ============================================================
+echo  SimWheel FFB Bridge - Simagic Alpha EVO Sport (9 Nm)
+echo  Keep this window open while playing.
+echo  Closing it cuts force feedback (the game keeps working).
+echo ============================================================
+echo  Before first run, in SimPro Manager: FFB gain 100%%,
+echo  in-base spring/damper/centering 0, rotation 1080 degrees.
+echo  (Different rotation? Edit this file's --range to match.)
+echo ============================================================
+echo.
+"%~dp0simwheel-bridge.exe" --rated-torque 9 --range 1080 --verbose
+echo.
+echo Bridge exited. If that was unexpected, read the message above,
+echo then check BRIDGE-README.txt.
+pause
+"""
+
 BRIDGE_TXT = f"""SimWheel FFB Bridge {VERSION} (Windows)
 =====================================
 
@@ -80,17 +100,33 @@ BEFORE FIRST RUN (MOZA):
   2. Set the base to game FFB mode; set the in-base spring and damper to 0.
   3. Set the base's own maximum torque to 50% for your first drives.
   4. Set rotation to 1080 degrees (or start the bridge with --range <deg>).
+  Then double-click START-FFB-BRIDGE.bat.
 
-RUN: double-click START-FFB-BRIDGE.bat (before or after starting the game -
-the game finds the bridge automatically within a couple of seconds).
+BEFORE FIRST RUN (SIMAGIC Alpha EVO):
+  1. Install SimPro Manager V3 (it ships the drivers).
+  2. In SimPro: force-feedback gain 100% (it RESCALES game torque - any
+     other value breaks the Nm calibration; the real safety limits are the
+     game/bridge clamps below), in-base spring/damper/centering 0,
+     rotation 1080 degrees.
+  3. Double-click START-FFB-BRIDGE-SIMAGIC-EVO-SPORT.bat (preset for the
+     9 Nm EVO Sport). A different EVO model: edit its --rated-torque to
+     your base's rating (EVO 12 / Pro 18 / Ultra 28) - Simagic bases share
+     USB ids across ratings, so the bridge refuses to guess.
 
-The bridge recognizes MOZA R-series bases automatically. A different
+RUN: the launcher, before or after starting the game - the game finds the
+bridge automatically within a couple of seconds.
+
+The bridge recognizes MOZA R-series bases automatically. Any other
 wheelbase needs:  simwheel-bridge.exe --rated-torque <its rated Nm>
 
 SAFETY: torque is clamped to 2.5 Nm in the game and 5 Nm in the bridge by
 default, ramps in over half a second, and cuts automatically if the game
 stops responding, the bridge is closed, or anything crashes. Keep hands
 clear of the rim the first time you engage anyway.
+
+If the wheel ever pulls HARDER into a corner instead of back toward
+center: let go, close the bridge, and report it (on Simagic, first check
+no per-game SimPro profile with inverted FFB is active).
 
 Problems? See TESTING.md in the repo, or run:  simwheel-bridge.exe --list
 """
@@ -140,6 +176,12 @@ automatically within a couple of seconds).
 
 The bridge recognizes MOZA R-series bases automatically. A different
 wheelbase needs:  ./simwheel-bridge --rated-torque <its rated Nm>
+
+SIMAGIC ON LINUX: current Simagic firmware (v171+) does not work with the
+generic kernel FFB driver - you need the out-of-tree simagic-ff driver
+(https://github.com/JacKeTUs/simagic-ff) before the base shows up as an
+FFB device. Then run with your base's rating, e.g. for an Alpha EVO
+Sport:  ./simwheel-bridge --rated-torque 9 --range <SimPro rotation>
 
 SAFETY: torque is clamped to 2.5 Nm in the game and 5 Nm in the bridge by
 default, ramps in over half a second, and cuts automatically if the game
@@ -203,6 +245,7 @@ def build_mrpack(out_path: str) -> None:
         z.writestr('modrinth.index.json', json.dumps(index, indent=2))
         z.write(MOD_JAR, f'overrides/mods/{os.path.basename(MOD_JAR)}')
         z.write(SCHEMATIC, f'overrides/schematics/{os.path.basename(SCHEMATIC)}')
+        z.write(TRACK, f'overrides/schematics/{os.path.basename(TRACK)}')
     print(f'  wrote {out_path} ({os.path.getsize(out_path)} bytes)')
 
 
@@ -210,6 +253,7 @@ def build_bridge_zip(out_path: str) -> None:
     with zipfile.ZipFile(out_path, 'w', zipfile.ZIP_DEFLATED) as z:
         z.write(SIDECAR_EXE, 'simwheel-bridge.exe')
         z.writestr('START-FFB-BRIDGE.bat', BRIDGE_BAT)
+        z.writestr('START-FFB-BRIDGE-SIMAGIC-EVO-SPORT.bat', BRIDGE_BAT_SIMAGIC)
         z.writestr('BRIDGE-README.txt', BRIDGE_TXT)
     print(f'  wrote {out_path} ({os.path.getsize(out_path)} bytes)')
 
@@ -240,7 +284,8 @@ def build_bridge_tarball(out_path: str) -> None:
 def main() -> None:
     # Hard prerequisites — no kit without these.
     for prereq, hint in [(MOD_JAR, './gradlew :mod:build'),
-                         (SCHEMATIC, 'python tools/make_test_structures.py')]:
+                         (SCHEMATIC, 'python tools/make_test_structures.py'),
+                         (TRACK, 'python tools/make_test_structures.py')]:
         if not os.path.exists(prereq):
             raise SystemExit(f'missing {prereq} — run: {hint}')
     os.makedirs('dist', exist_ok=True)

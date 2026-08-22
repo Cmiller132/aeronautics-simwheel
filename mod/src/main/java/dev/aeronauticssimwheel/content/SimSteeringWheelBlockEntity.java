@@ -69,6 +69,8 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     public static final float DEFAULT_LOCK_DEG = 450f;
     public static final int[] LOCK_PRESETS = {180, 270, 360, 450, 540, 720, 900, 1080};
     public static final int[] FAILSAFE_PRESETS = {0, 5, 10, 15};
+    /** Per-craft FFB gain trim presets (absolute physics + trim, §6.2). */
+    public static final float[] FFB_TRIM_PRESETS = {1f, 1.5f, 2f, 3f, 0.25f, 0.5f, 0.75f};
 
     private final Map<SimChannel, ChannelEntry> channels = new EnumMap<>(SimChannel.class);
 
@@ -82,6 +84,10 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     private float angleDeg;
     private float lockDeg = DEFAULT_LOCK_DEG;
     private int failsafeBrake;
+    /** Per-craft FFB gain trim (multiplies the telemetry frame's torque channels). */
+    private float ffbTrim = 1f;
+    /** One loud line + degrade when a sampler read breaks on upstream churn (§10.4). */
+    private static boolean samplerFaulted;
 
     /**
      * Phase 3 mount links, stored as offsets from this block (translation-
@@ -101,11 +107,12 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     /** Phase 2a rig: sampled per physics substep, flushed per game tick. */
     private final GroundTelemetrySampler telemetry = new GroundTelemetrySampler();
 
-    /** Transient placeholder-UX cursor: link channels, then the two settings. */
+    /** Transient placeholder-UX cursor: link channels, then the settings. */
     private int configCursor;
     private static final int CURSOR_LOCK = SimChannel.values().length;
     private static final int CURSOR_FAILSAFE = CURSOR_LOCK + 1;
-    private static final int CURSOR_COUNT = CURSOR_FAILSAFE + 1;
+    private static final int CURSOR_FFB_TRIM = CURSOR_FAILSAFE + 1;
+    private static final int CURSOR_COUNT = CURSOR_FFB_TRIM + 1;
 
     public SimSteeringWheelBlockEntity(BlockPos pos, BlockState state) {
         super(SimWheelRegistry.SIM_STEERING_WHEEL_BE.get(), pos, state);
@@ -194,13 +201,44 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         }
     }
 
-    /** Sable, per physics substep on an assembled craft (Phase 2a rig). */
+    /**
+     * Sable, per physics substep on an assembled craft (Phase 2a rig).
+     *
+     * <p>Guarded: the sampler hard-links several upstream reads that the
+     * startup health check can miss on partial upstream churn — a linkage
+     * error here would otherwise propagate straight into Sable's physics
+     * loop. Instead: one loud line, telemetry off for the session, craft
+     * drives on (§10.4).
+     */
     @Override
     public void sable$physicsTick(ServerSubLevel subLevel, RigidBodyHandle handle,
                                   double timeStep) {
-        if (engaged() && !inputTimedOut()) {
-            telemetry.sampleSubstep(this, subLevel, timeStep);
+        if (samplerFaulted || !engaged() || inputTimedOut()) {
+            return;
         }
+        try {
+            telemetry.sampleSubstep(this, subLevel, timeStep);
+        } catch (RuntimeException | LinkageError e) {
+            samplerFaulted = true;
+            dev.aeronauticssimwheel.AeronauticsSimwheel.LOGGER.error(
+                    "SimWheel: ground telemetry sampler failed — FFB telemetry disabled "
+                            + "for this session (upstream update?)", e);
+        }
+    }
+
+    /** The wheel block's horizontal facing (side attribution, HUD). */
+    public Direction facing() {
+        return getBlockState().getValue(SimSteeringWheelBlock.FACING);
+    }
+
+    /** Per-craft FFB gain trim (≥ 0; multiplies telemetry torque channels). */
+    public float ffbTrim() {
+        return ffbTrim;
+    }
+
+    /** Absolute positions of explicitly linked mounts (empty = heuristic). */
+    public Set<BlockPos> linkedMountPositions() {
+        return registeredMounts;
     }
 
     /** The Phase 2a rig state (gametests, HUD-side debugging). */
@@ -404,6 +442,9 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         if (configCursor == CURSOR_FAILSAFE) {
             return "FAILSAFE_BRAKE";
         }
+        if (configCursor == CURSOR_FFB_TRIM) {
+            return "FFB_TRIM";
+        }
         return SimChannel.values()[configCursor].name();
     }
 
@@ -418,6 +459,11 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
             failsafeBrake = nextPreset(FAILSAFE_PRESETS, failsafeBrake);
             setChanged();
             return "Failsafe brake: " + failsafeBrake + "/15 on signal loss";
+        }
+        if (configCursor == CURSOR_FFB_TRIM) {
+            ffbTrim = nextPreset(FFB_TRIM_PRESETS, ffbTrim);
+            setChanged();
+            return "FFB trim: ×" + ffbTrim + " (this craft's telemetry gain)";
         }
         SimChannel ch = SimChannel.values()[configCursor];
         ChannelEntry entry = channels.get(ch);
@@ -437,6 +483,15 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
     }
 
     private static int nextPreset(int[] presets, int current) {
+        for (int i = 0; i < presets.length; i++) {
+            if (presets[i] == current) {
+                return presets[(i + 1) % presets.length];
+            }
+        }
+        return presets[0];
+    }
+
+    private static float nextPreset(float[] presets, float current) {
         for (int i = 0; i < presets.length; i++) {
             if (presets[i] == current) {
                 return presets[(i + 1) % presets.length];
@@ -482,6 +537,7 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         tag.put("Bindings", bindings);
         tag.putFloat("LockDeg", lockDeg);
         tag.putInt("FailsafeBrake", failsafeBrake);
+        tag.putFloat("FfbTrim", ffbTrim);
         tag.putLongArray("LinkedMounts",
                 linkedMountOffsets.stream().mapToLong(BlockPos::asLong).toArray());
     }
@@ -503,6 +559,9 @@ public final class SimSteeringWheelBlockEntity extends BlockEntity
         }
         if (tag.contains("FailsafeBrake")) {
             failsafeBrake = tag.getInt("FailsafeBrake");
+        }
+        if (tag.contains("FfbTrim")) {
+            ffbTrim = Mth.clamp(tag.getFloat("FfbTrim"), 0f, 10f);
         }
         if (tag.contains("LinkedMounts")) {
             linkedMountOffsets.clear();

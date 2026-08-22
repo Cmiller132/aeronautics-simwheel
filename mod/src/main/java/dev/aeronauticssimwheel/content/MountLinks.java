@@ -106,6 +106,11 @@ public final class MountLinks {
         return LINKER_SESSIONS.get(player);
     }
 
+    /** Logout hygiene: a linker session must not outlive its player. */
+    public static synchronized void clearSession(UUID player) {
+        LINKER_SESSIONS.remove(player);
+    }
+
     /** Test/debug: number of registered mount links in a level. */
     static synchronized int count(Level level) {
         Map<BlockPos, BlockPos> map = BY_LEVEL.get(level);

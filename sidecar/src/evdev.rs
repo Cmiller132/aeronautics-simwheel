@@ -24,9 +24,9 @@
 //!   pointer), and only a successful erase or a later confirmed zero upload
 //!   re-authorizes anything. Unconfirmed parameters quarantine the effect:
 //!   the retrigger loop's only permitted action is forcing a ZERO.
-//! - Rated torque is explicit: USB product id first (MOZA VID 0x346e; the
-//!   shared R16/R21 ids 0x0000 and 0x0010 are never guessed), name second,
-//!   `--rated-torque` required otherwise.
+//! - Rated torque is explicit: USB product id first (the shared MOZA
+//!   VID/PID table in device.rs; the shared R16/R21 ids 0x0000 and 0x0010
+//!   are never guessed), name second, `--rated-torque` required otherwise.
 //! - Device loss (ENODEV) bumps the connection epoch — the bridge disarms
 //!   the session and requires a fresh client START (deliberate re-engage).
 //!   Re-attach verifies device identity (uniq/phys captured at open) on the
@@ -44,7 +44,7 @@
 //! the asm-generic ioctl layout and 64-bit little-endian struct layout, so
 //! the build is gated to x86_64/aarch64 below.
 
-use crate::device::{resolve_rated_nm, FfbDevice, WheelState};
+use crate::device::{rated_by_usb_id, resolve_rated_nm_with_usb_id, FfbDevice, WheelState};
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
@@ -63,6 +63,7 @@ compile_error!(
      enabling other architectures or endiannesses"
 );
 
+const EV_ABS: u16 = 0x03;
 const EV_FF: u16 = 0x15;
 const ABS_X: u32 = 0x00;
 const FF_CONSTANT: usize = 0x52;
@@ -71,6 +72,7 @@ const FF_AUTOCENTER: u16 = 0x61;
 const FF_CNT: usize = 0x80;
 const KEY_CNT: usize = 0x300;
 const BTN_JOYSTICK: usize = 0x120;
+const BTN_GAMEPAD: usize = 0x130;
 const BTN_TRIGGER_HAPPY: usize = 0x2c0;
 
 /// Effect duration (ms) and re-trigger cadence: the hardware self-zeroes
@@ -81,8 +83,6 @@ const REOPEN_EVERY: Duration = Duration::from_secs(1);
 /// Bound on queued-event reads per poll — a noisy device must not starve
 /// the 250 Hz loop (the bridge bounds its UDP drain the same way).
 const MAX_DRAIN_READS_PER_POLL: u32 = 64;
-
-const MOZA_VID: u16 = 0x346e;
 
 // linux/ioctl.h encoding, type 'E' (input): dir<<30 | size<<16 | 'E'<<8 | nr.
 const IOC_WRITE: u64 = 1;
@@ -276,22 +276,6 @@ fn identity_matches(stored: &Identity, cur: &Identity) -> bool {
     true
 }
 
-/// Never guess between the R16 and R21 — they share product ids (0x0000
-/// first-gen, 0x0010 second-gen), so those fall through to name matching /
-/// `--rated-torque`. Second-generation ids per the kernel's hid-ids.h.
-fn rated_by_usb_id(id: &InputId) -> Option<f32> {
-    if id.vendor != MOZA_VID {
-        return None;
-    }
-    match id.product {
-        0x0002 | 0x0012 => Some(9.0),  // R9 (gen 1 / gen 2)
-        0x0004 | 0x0014 => Some(5.5),  // R5
-        0x0005 | 0x0015 => Some(3.9),  // R3
-        0x0006 | 0x0016 => Some(12.0), // R12
-        _ => None,
-    }
-}
-
 struct Candidate {
     path: PathBuf,
     name: String,
@@ -367,6 +351,18 @@ fn torque_to_level(nm: f32, rated_nm: f32) -> i16 {
     ((nm / rated_nm) * 32767.0).clamp(-32767.0, 32767.0) as i16
 }
 
+/// Velocity from two consecutive ABS_X events' (degrees, kernel-timestamp
+/// seconds) pairs. `None` when the interval is non-positive or absurd
+/// (duplicate stamps, a clock step) — the caller then keeps its estimate.
+fn event_pair_vel(prev: (f32, f64), cur: (f32, f64)) -> Option<f32> {
+    let dt = cur.1 - prev.1;
+    if dt > 0.0 && dt < 1.0 {
+        Some(((cur.0 - prev.0) as f64 / dt) as f32)
+    } else {
+        None
+    }
+}
+
 pub struct EvdevDevice {
     file: Option<File>,
     ident: Identity,
@@ -377,6 +373,11 @@ pub struct EvdevDevice {
     abs: AbsInfo,
     prev_deg: f32,
     vel_deg_per_s: f32,
+    /// The last ABS_X input_event seen (degrees, kernel timestamp seconds):
+    /// consecutive events give a finer velocity estimate than the 250 Hz
+    /// tick difference. Cleared on connection loss/reopen so a stale sample
+    /// from the old fd can never pair with the new fd's first event.
+    last_abs_event: Option<(f32, f64)>,
     /// Suppress the velocity sample right after (re)open — a stale prev_deg
     /// against a fresh angle would synthesize an enormous spike.
     skip_vel_sample: bool,
@@ -543,9 +544,12 @@ impl EvdevDevice {
         // (scan's snapshot could be stale if udev renumbered in between).
         let rated_nm = match rated_nm {
             Some(nm) => nm,
-            None => match rated_by_usb_id(&ident.id) {
+            None => match rated_by_usb_id(ident.id.vendor, ident.id.product) {
                 Some(nm) => nm,
-                None => resolve_rated_nm(&ident.name, None)?,
+                // Simagic ids are recognized but rating-ambiguous — this
+                // errs with the tailored --rated-torque message.
+                None => resolve_rated_nm_with_usb_id(
+                    &ident.name, ident.id.vendor, ident.id.product, None)?,
             },
         };
 
@@ -572,6 +576,7 @@ impl EvdevDevice {
             abs,
             prev_deg: 0.0,
             vel_deg_per_s: 0.0,
+            last_abs_event: None,
             skip_vel_sample: true,
             output_fault: false,
             effect_id: Some(effect_id),
@@ -707,6 +712,7 @@ impl EvdevDevice {
         self.last_level = 0;
         self.params_valid = true;
         self.vel_deg_per_s = 0.0;
+        self.last_abs_event = None;
         self.epoch = self.epoch.wrapping_add(1);
     }
 
@@ -760,6 +766,7 @@ impl EvdevDevice {
                     self.last_level = 0;
                     self.params_valid = true;
                     self.skip_vel_sample = true;
+                    self.last_abs_event = None;
                     // The connection changed AGAIN (absent → present): bump
                     // the epoch on the RETURN too, not just the loss. A
                     // START that arrived while the device was gone must not
@@ -783,11 +790,25 @@ impl EvdevDevice {
             if bit(&keys, BTN_JOYSTICK + i) {
                 b |= 1 << i;
             }
-            if bit(&keys, BTN_TRIGGER_HAPPY + i) {
+            // Bits 16–31 are the OR-union of BTN_TRIGGER_HAPPY+0..15
+            // (0x2c0..0x2cf — where extra wheel buttons usually land) and
+            // BTN_GAMEPAD+0..15 (0x130..0x13f — where some HID mappings put
+            // them instead). A wheel populates one range or the other, so
+            // the union costs nothing and covers both conventions; if a
+            // device ever populated both, the OR would merge them.
+            if bit(&keys, BTN_TRIGGER_HAPPY + i) || bit(&keys, BTN_GAMEPAD + i) {
                 b |= 1 << (16 + i);
             }
         }
         b
+    }
+
+    /// Raw ABS_X counts → degrees, using the axis extents captured at open
+    /// and the operator-configured rotation range.
+    fn counts_to_deg(&self, value: i32) -> f32 {
+        let center = (self.abs.minimum as f64 + self.abs.maximum as f64) / 2.0;
+        let half = ((self.abs.maximum as f64 - self.abs.minimum as f64) / 2.0).max(1.0);
+        (((value as f64 - center) / half) * (self.range_deg as f64 / 2.0)) as f32
     }
 }
 
@@ -821,9 +842,13 @@ impl FfbDevice for EvdevDevice {
             };
         };
 
-        // Drain the event queue (state comes from ioctls; an unread queue
-        // would just accumulate server-side). Bounded: a noisy device must
-        // not starve the 250 Hz loop.
+        // Drain the event queue (position authority stays with EVIOCGABS;
+        // an unread queue would just accumulate server-side) — but the
+        // stream is not discarded: ABS_X events carry kernel timestamps and
+        // intermediate samples, giving a finer velocity estimate than the
+        // 250 Hz tick difference. Bounded: a noisy device must not starve
+        // the 250 Hz loop.
+        let mut event_vel = false;
         let mut buf = [0u8; std::mem::size_of::<InputEvent>() * 32];
         let mut reads = 0u32;
         while reads < MAX_DRAIN_READS_PER_POLL {
@@ -842,6 +867,35 @@ impl FfbDevice for EvdevDevice {
                 }
                 break;
             }
+            let n = n as usize;
+            let sz = std::mem::size_of::<InputEvent>();
+            for off in (0..n).step_by(sz) {
+                if off + sz > n {
+                    break; // partial trailing bytes (defensive; evdev reads whole events)
+                }
+                // SAFETY: InputEvent is plain old data and the read returned
+                // at least off+sz bytes; read_unaligned tolerates any offset.
+                let ev: InputEvent = unsafe {
+                    std::ptr::read_unaligned(buf.as_ptr().add(off) as *const InputEvent)
+                };
+                if ev.type_ != EV_ABS || ev.code != ABS_X as u16 {
+                    continue;
+                }
+                let sample = (
+                    self.counts_to_deg(ev.value),
+                    ev.time_sec as f64 + ev.time_usec as f64 * 1e-6,
+                );
+                // Differentiate consecutive event pairs — but never across a
+                // (re)acquire (`skip_vel_sample`), same seed-don't-
+                // differentiate guard as the tick path.
+                if !self.skip_vel_sample {
+                    if let Some(v) = self.last_abs_event.and_then(|prev| event_pair_vel(prev, sample)) {
+                        self.vel_deg_per_s += (v - self.vel_deg_per_s) * 0.3;
+                        event_vel = true;
+                    }
+                }
+                self.last_abs_event = Some(sample);
+            }
         }
 
         self.ensure_effect_running();
@@ -859,16 +913,17 @@ impl FfbDevice for EvdevDevice {
         let mut abs = AbsInfo::default();
         match xioctl(fd, EVIOCGABS_X, &mut abs as *mut _ as *mut c_void) {
             Ok(()) => {
-                let center = (self.abs.minimum as f64 + self.abs.maximum as f64) / 2.0;
-                let half = ((self.abs.maximum as f64 - self.abs.minimum as f64) / 2.0).max(1.0);
-                let deg =
-                    (((abs.value as f64 - center) / half) * (self.range_deg as f64 / 2.0)) as f32;
+                // EVIOCGABS stays the position authority; the event stream
+                // above only feeds the velocity estimate.
+                let deg = self.counts_to_deg(abs.value);
                 if self.skip_vel_sample {
                     // First sample after (re)open: seed, don't differentiate.
                     self.skip_vel_sample = false;
                     self.vel_deg_per_s = 0.0;
-                } else if dt_s > 0.0 {
-                    // Light smoothing on the derivative: raw HID deltas are steppy.
+                } else if !event_vel && dt_s > 0.0 {
+                    // No ABS_X events arrived this tick — fall back to the
+                    // 250 Hz tick finite difference, lightly smoothed (raw
+                    // HID deltas are steppy).
                     let v = (deg - self.prev_deg) / dt_s as f32;
                     self.vel_deg_per_s += (v - self.vel_deg_per_s) * 0.3;
                 }
@@ -1040,28 +1095,29 @@ mod tests {
         assert!((8000..=8400).contains(&quarter), "2.25/9 Nm ≈ quarter scale, got {quarter}");
     }
 
+    // The MOZA VID/PID → rated-torque table moved to device.rs (shared with
+    // the DirectInput backend) — its test lives there now.
+
+    /// Event-timestamp velocity: consecutive ABS_X samples differentiate;
+    /// duplicate or non-monotonic timestamps yield nothing (the estimate is
+    /// kept, never poisoned).
     #[test]
-    fn moza_usb_id_table() {
-        let id = |product| InputId { bustype: 3, vendor: MOZA_VID, product, version: 0 };
-        // Gen 1
-        assert_eq!(rated_by_usb_id(&id(0x0002)), Some(9.0));
-        assert_eq!(rated_by_usb_id(&id(0x0004)), Some(5.5));
-        assert_eq!(rated_by_usb_id(&id(0x0005)), Some(3.9));
-        assert_eq!(rated_by_usb_id(&id(0x0006)), Some(12.0));
-        // Gen 2 (kernel hid-ids.h)
-        assert_eq!(rated_by_usb_id(&id(0x0012)), Some(9.0));
-        assert_eq!(rated_by_usb_id(&id(0x0014)), Some(5.5));
-        assert_eq!(rated_by_usb_id(&id(0x0015)), Some(3.9));
-        assert_eq!(rated_by_usb_id(&id(0x0016)), Some(12.0));
-        // R16 and R21 share ids in BOTH generations — must NOT be guessed.
-        assert_eq!(rated_by_usb_id(&id(0x0000)), None);
-        assert_eq!(rated_by_usb_id(&id(0x0010)), None);
-        let other = InputId { bustype: 3, vendor: 0x046d, product: 0x0002, version: 0 };
-        assert_eq!(rated_by_usb_id(&other), None);
+    fn event_pair_velocity_math() {
+        // 1 degree in 4 ms → 250 deg/s.
+        assert_eq!(event_pair_vel((10.0, 1.000), (11.0, 1.004)), Some(250.0));
+        // Negative-going motion.
+        assert_eq!(event_pair_vel((11.0, 1.000), (10.0, 1.004)), Some(-250.0));
+        // Duplicate timestamp: no division by zero, no sample.
+        assert_eq!(event_pair_vel((10.0, 1.000), (11.0, 1.000)), None);
+        // Clock stepped backwards: rejected.
+        assert_eq!(event_pair_vel((10.0, 2.000), (11.0, 1.000)), None);
+        // Absurdly long gap (stale pair): rejected.
+        assert_eq!(event_pair_vel((10.0, 1.0), (11.0, 3.0)), None);
     }
 
     #[test]
     fn reattach_identity_rules() {
+        use crate::device::MOZA_VID;
         let base = Identity {
             id: InputId { bustype: 3, vendor: MOZA_VID, product: 0x0002, version: 1 },
             name: "MOZA R9 Base".into(),

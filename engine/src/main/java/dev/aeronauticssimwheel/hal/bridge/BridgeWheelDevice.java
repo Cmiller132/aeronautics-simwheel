@@ -72,6 +72,9 @@ public final class BridgeWheelDevice
     private volatile int flags;
     private volatile long lastStateNanos;
     private volatile float ratedTorqueNm = 9f; // MOZA R9 until HELLO says otherwise
+    /** The sidecar's --range from HELLO (v2) — wins over the local config so
+     *  both ends scale the angle identically; 0 until a HELLO arrives. */
+    private volatile float helloRangeDeg;
     private volatile String deviceName = "bridge (no hello yet)";
     private volatile boolean panicLatched;
 
@@ -111,6 +114,10 @@ public final class BridgeWheelDevice
                             float rated = h.ratedTorqueNm();
                             if (Float.isFinite(rated) && rated >= 0.5f && rated <= 30f) {
                                 ratedTorqueNm = rated;
+                            }
+                            float range = h.rangeDeg();
+                            if (Float.isFinite(range) && range >= 90f && range <= 2880f) {
+                                helloRangeDeg = range;
                             }
                             deviceName = h.deviceName();
                         }
@@ -180,18 +187,29 @@ public final class BridgeWheelDevice
         return connected() && (flags & BridgeProtocol.FLAG_FAULT) != 0;
     }
 
+    /**
+     * True while the bridge session would accept TORQUE (STATE FLAG_ARMED, v2).
+     * After an epoch disarm the STATE stream keeps flowing while TORQUE is
+     * silently discarded — this makes that state observable so the input layer
+     * can re-arm with a START instead of waiting out a silence timeout.
+     */
+    public boolean armed() {
+        return connected() && (flags & BridgeProtocol.FLAG_ARMED) != 0;
+    }
+
     @Override
     public String id() {
         return "bridge/" + deviceName;
     }
 
-    /** Axis 0 = steering normalized to the configured rotation range. */
+    /** Axis 0 = steering normalized to the rotation range (HELLO's when known). */
     @Override
     public float axis(int index) {
         if (index != 0) {
             return 0f;
         }
-        float half = cfg.rotationRangeDeg() / 2f;
+        float range = helloRangeDeg > 0 ? helloRangeDeg : cfg.rotationRangeDeg();
+        float half = range / 2f;
         return Math.max(-1f, Math.min(1f, steeringDeg / half));
     }
 

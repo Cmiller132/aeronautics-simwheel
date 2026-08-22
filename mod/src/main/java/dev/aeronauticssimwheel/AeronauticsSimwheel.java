@@ -27,10 +27,11 @@ public final class AeronauticsSimwheel {
     public static final String MOD_ID = "aeronautics_simwheel";
     public static final Logger LOGGER = LogUtils.getLogger();
 
-    public AeronauticsSimwheel(IEventBus modEventBus) {
+    public AeronauticsSimwheel(IEventBus modEventBus, net.neoforged.fml.ModContainer container) {
         SimWheelRegistry.init(modEventBus);
         modEventBus.addListener(this::onRegisterGameTests);
-        modEventBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("1")
+        // Registrar "2": the telemetry packet carries component frames now.
+        modEventBus.addListener((RegisterPayloadHandlersEvent e) -> e.registrar("2")
                 .playToServer(SimWheelInputPacket.TYPE, SimWheelInputPacket.CODEC,
                         SimWheelInputPacket::handle)
                 .playToClient(FfbTelemetryPacket.TYPE, FfbTelemetryPacket.CODEC,
@@ -40,10 +41,17 @@ public final class AeronauticsSimwheel {
         modEventBus.addListener((FMLCommonSetupEvent e) -> HealthCheck.runAndLog());
         net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(
                 dev.aeronauticssimwheel.content.MountLinkerInteraction::onRightClickBlock);
+        // Per-player server state must not outlive the player (leak hygiene).
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener(
+                (net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent e) -> {
+                    SimWheelInputPacket.evictSender(e.getEntity().getUUID());
+                    dev.aeronauticssimwheel.content.MountLinks.clearSession(e.getEntity().getUUID());
+                });
         if (FMLEnvironment.dist.isClient()) {
             SimWheelClient.init(modEventBus);
         }
-        LOGGER.info("Aeronautics SimWheel 0.2.0 loaded");
+        LOGGER.info("Aeronautics SimWheel {} loaded",
+                container.getModInfo().getVersion());
     }
 
     private void onRegisterGameTests(RegisterGameTestsEvent event) {

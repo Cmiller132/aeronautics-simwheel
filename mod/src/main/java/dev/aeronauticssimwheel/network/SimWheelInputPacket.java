@@ -77,12 +77,24 @@ public record SimWheelInputPacket(BlockPos pos, float steering, float throttle,
                     instanceof SimSteeringWheelBlockEntity be)) {
                 return;
             }
-            if (player.distanceToSqr(effectiveWheelPos(player, packet.pos())) > MAX_RANGE_SQ) {
+            Vec3 wheelPos = effectiveWheelPos(player, packet.pos());
+            // Both the player AND the seat they ride must be at the wheel — a
+            // mount ridden near someone else's craft doesn't qualify. (Full
+            // craft-identity validation needs an upstream seat API; this keeps
+            // the drive-by window at "seated within reach", not "riding
+            // anything anywhere near".)
+            if (player.distanceToSqr(wheelPos) > MAX_RANGE_SQ
+                    || seat.distanceToSqr(wheelPos) > MAX_RANGE_SQ) {
                 return;
             }
             be.applyInput(player.getUUID(), seat.blockPosition(), packet.steering(),
                     packet.throttle(), packet.brake(), packet.clutch(), packet.buttons());
         });
+    }
+
+    /** Logout hygiene: per-sender gates must not outlive the player. */
+    public static void evictSender(java.util.UUID player) {
+        SENDER_GATES.remove(player);
     }
 
     /** The wheel's world-space position: sub-level pose applied when assembled. */

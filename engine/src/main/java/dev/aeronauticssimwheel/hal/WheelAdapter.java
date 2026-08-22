@@ -35,27 +35,43 @@ public final class WheelAdapter {
         buttons.put(button, new ButtonBinding(device, buttonIndex));
     }
 
+    /** Default pedal shaping: small bottom deadzone, light smoothing. */
+    private static final float PEDAL_DEADZONE = 0.02f;
+    private static final float PEDAL_SMOOTHING_HZ = 8f;
+
     /**
      * Sane defaults for an unconfigured generic wheel: axis 0 = steering (raw,
-     * no deadzone — direct-drive bases are precise), axis 1 = throttle pedal,
-     * axis 2 = brake if present; button 0 = ENGAGE, button 1 = DETENT_MODIFIER.
-     * Real per-device mapping (MOZA R9 + pedals) comes from the config UI.
+     * no deadzone — direct-drive bases are precise); axes 1/2/3 = throttle,
+     * brake, clutch pedals where present (full-travel pedal shaping — rest at
+     * raw −1 reads 0); button 0 = ENGAGE, button 1 = DETENT_MODIFIER.
+     * Per-axis overrides come from the feel config's bindings section.
      */
     public static WheelAdapter autoBind(WheelDevice device) {
         WheelAdapter a = new WheelAdapter();
         a.bindAxis(LogicalAxis.STEERING, device, 0,
                 new AxisProcessor(AxisProcessor.Config.identity()));
         if (device.axisCount() > 1) {
-            a.bindAxis(LogicalAxis.THROTTLE, device, 1, new AxisProcessor(
-                    new AxisProcessor.Config(-1f, 0f, 1f, 0.02f, 0f, false, 8f)));
+            bindPedal(a, LogicalAxis.THROTTLE, device, 1, false);
         }
         if (device.axisCount() > 2) {
-            a.bindAxis(LogicalAxis.BRAKE, device, 2, new AxisProcessor(
-                    new AxisProcessor.Config(-1f, 0f, 1f, 0.02f, 0f, false, 8f)));
+            bindPedal(a, LogicalAxis.BRAKE, device, 2, false);
+        }
+        if (device.axisCount() > 3) {
+            bindPedal(a, LogicalAxis.CLUTCH, device, 3, false);
         }
         a.bindButton(LogicalButton.ENGAGE, device, 0);
         a.bindButton(LogicalButton.DETENT_MODIFIER, device, 1);
         return a;
+    }
+
+    /** Bind one pedal from any device (composition: wheel + separate pedal set). */
+    public static void bindPedal(WheelAdapter a, LogicalAxis axis, WheelDevice device,
+                                 int axisIndex, boolean invert) {
+        if (axisIndex < 0 || axisIndex >= device.axisCount()) {
+            return;
+        }
+        a.bindAxis(axis, device, axisIndex, new AxisProcessor(
+                AxisProcessor.Config.pedal(PEDAL_DEADZONE, invert, PEDAL_SMOOTHING_HZ)));
     }
 
     /** Sample every bound axis/button through its processing. Call once per frame. */

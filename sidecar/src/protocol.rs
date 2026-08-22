@@ -1,12 +1,18 @@
-//! AWFB wire protocol v1 — the Rust mirror of the mod's `BridgeProtocol.java`
+//! AWFB wire protocol v2 — the Rust mirror of the mod's `BridgeProtocol.java`
 //! (engine/src/main/java/dev/aeronauticssimwheel/hal/bridge/BridgeProtocol.java).
 //! UDP, localhost, little-endian. Header: magic "AWFB", u8 version, u8 frame
 //! type, u32 sequence. Decoding is total: malformed input yields `None`, never
 //! a panic — a buggy/hostile peer must not take the bridge down (the bridge is
 //! the last thing standing between a 9 Nm motor and a human).
+//!
+//! v2 changes (both sides ship together — the version byte is hard-matched):
+//! - HELLO carries `range_deg` (the sidecar's configured rotation range)
+//!   immediately after `rated_torque_nm`.
+//! - STATE gains FLAG_ARMED (bit 3): set when the bridge would currently
+//!   ACCEPT a torque frame (`started && !panic_latched && !rearm_blocked`).
 
 pub const MAGIC: u32 = u32::from_le_bytes(*b"AWFB");
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 pub const DEFAULT_PORT: u16 = 46910;
 pub const MAX_FRAME_BYTES: usize = 64;
 
@@ -19,8 +25,11 @@ pub const TYPE_HELLO: u8 = 17;
 
 pub const FLAG_CONNECTED: u8 = 1;
 pub const FLAG_FAULT: u8 = 2;
-#[allow(dead_code)] // reserved in protocol v1, unused until hands-off detection
+#[allow(dead_code)] // reserved, unused until hands-off detection
 pub const FLAG_HANDS_OFF: u8 = 4;
+/// Set when the bridge would currently ACCEPT a torque frame:
+/// `started && !panic_latched && !rearm_blocked`.
+pub const FLAG_ARMED: u8 = 8;
 
 const HEADER_BYTES: usize = 4 + 1 + 1 + 4;
 
@@ -46,10 +55,14 @@ pub enum Frame {
         flags: u8,
         device_id_hash: u32,
     },
-    /// Bridge → mod on connect/START.
+    /// Bridge → mod on connect/START. 19 + len bytes on the wire:
+    /// rated_torque_nm f32, range_deg f32, len u8 (≤32), name UTF-8.
     Hello {
         sequence: u32,
         rated_torque_nm: f32,
+        /// The sidecar's `--range` value — the wheel's configured rotation
+        /// range in degrees (v2).
+        range_deg: f32,
         device_name: String,
     },
 }
@@ -92,10 +105,12 @@ pub fn encode(frame: &Frame, out: &mut [u8; MAX_FRAME_BYTES]) -> usize {
         Frame::Hello {
             sequence,
             rated_torque_nm,
+            range_deg,
             ref device_name,
         } => {
             w.u32(sequence);
             w.f32(rated_torque_nm);
+            w.f32(range_deg);
             let name = device_name.as_bytes();
             let len = name.len().min(32);
             w.u8(len as u8);
@@ -138,6 +153,7 @@ pub fn decode(buf: &[u8]) -> Option<Frame> {
         }),
         TYPE_HELLO => {
             let rated_torque_nm = r.f32()?;
+            let range_deg = r.f32()?;
             let len = r.u8()? as usize;
             if len > 32 {
                 return None;
@@ -146,6 +162,7 @@ pub fn decode(buf: &[u8]) -> Option<Frame> {
             Some(Frame::Hello {
                 sequence,
                 rated_torque_nm,
+                range_deg,
                 device_name: String::from_utf8_lossy(name).into_owned(),
             })
         }
@@ -243,12 +260,13 @@ mod tests {
             steering_deg: -123.4,
             steering_vel_deg_per_s: 55.5,
             buttons: 0b1010,
-            flags: FLAG_CONNECTED | FLAG_FAULT,
+            flags: FLAG_CONNECTED | FLAG_FAULT | FLAG_ARMED,
             device_id_hash: 0xDEADBEEF,
         });
         round_trip(Frame::Hello {
             sequence: 4,
             rated_torque_nm: 9.0,
+            range_deg: 1080.0,
             device_name: "MOZA R9".into(),
         });
     }
@@ -270,7 +288,7 @@ mod tests {
         );
         let expected: &[u8] = &[
             0x41, 0x57, 0x46, 0x42, // "AWFB"
-            0x01, // version
+            0x02, // version 2
             0x01, // TYPE_TORQUE
             0x07, 0x00, 0x00, 0x00, // sequence 7
             0x00, 0x00, 0xC0, 0x3F, // 1.5f
@@ -295,7 +313,7 @@ mod tests {
             &mut buf,
         );
         let expected: &[u8] = &[
-            0x41, 0x57, 0x46, 0x42, 0x01, 0x10, // header, TYPE_STATE=16
+            0x41, 0x57, 0x46, 0x42, 0x02, 0x10, // header (v2), TYPE_STATE=16
             0x01, 0x00, 0x00, 0x00, // seq
             0x00, 0x00, 0xB4, 0x42, // 90.0f
             0x00, 0x00, 0x00, 0x00, // 0.0f
@@ -303,6 +321,59 @@ mod tests {
             0x01, // flags
             0x2A, 0x00, 0x00, 0x00, // deviceIdHash 42
         ];
+        assert_eq!(&buf[..n], expected);
+    }
+
+    /// v2: an ARMED state frame — pins bit 3 so both sides agree on what
+    /// "the bridge would accept torque right now" looks like on the wire.
+    #[test]
+    fn golden_armed_state_frame_matches_java_layout() {
+        let mut buf = [0u8; MAX_FRAME_BYTES];
+        let n = encode(
+            &Frame::State {
+                sequence: 2,
+                steering_deg: 0.0,
+                steering_vel_deg_per_s: 0.0,
+                buttons: 0,
+                flags: FLAG_CONNECTED | FLAG_ARMED,
+                device_id_hash: 42,
+            },
+            &mut buf,
+        );
+        let expected: &[u8] = &[
+            0x41, 0x57, 0x46, 0x42, 0x02, 0x10, // header (v2), TYPE_STATE=16
+            0x02, 0x00, 0x00, 0x00, // seq 2
+            0x00, 0x00, 0x00, 0x00, // 0.0f steering
+            0x00, 0x00, 0x00, 0x00, // 0.0f velocity
+            0x00, 0x00, 0x00, 0x00, // buttons 0
+            0x09, // flags: FLAG_CONNECTED | FLAG_ARMED
+            0x2A, 0x00, 0x00, 0x00, // deviceIdHash 42
+        ];
+        assert_eq!(&buf[..n], expected);
+    }
+
+    /// v2: HELLO layout — rated f32, range f32 (NEW), len u8, name bytes.
+    #[test]
+    fn golden_hello_frame_matches_java_layout() {
+        let mut buf = [0u8; MAX_FRAME_BYTES];
+        let n = encode(
+            &Frame::Hello {
+                sequence: 4,
+                rated_torque_nm: 9.0,
+                range_deg: 1080.0,
+                device_name: "MOZA R9".into(),
+            },
+            &mut buf,
+        );
+        let expected: &[u8] = &[
+            0x41, 0x57, 0x46, 0x42, 0x02, 0x11, // header (v2), TYPE_HELLO=17
+            0x04, 0x00, 0x00, 0x00, // seq 4
+            0x00, 0x00, 0x10, 0x41, // 9.0f rated
+            0x00, 0x00, 0x87, 0x44, // 1080.0f range (v2)
+            0x07, // name length
+            0x4D, 0x4F, 0x5A, 0x41, 0x20, 0x52, 0x39, // "MOZA R9"
+        ];
+        assert_eq!(n, 19 + 7, "HELLO is 19 + len bytes");
         assert_eq!(&buf[..n], expected);
     }
 
@@ -324,6 +395,7 @@ mod tests {
             &Frame::Hello {
                 sequence: 4,
                 rated_torque_nm: 9.0,
+                range_deg: 1080.0,
                 device_name: "MOZA R9".into(),
             },
             &mut buf,
@@ -331,13 +403,15 @@ mod tests {
         for cut in 0..n {
             let _ = decode(&buf[..cut]); // must simply not panic
         }
-        // Hello with a lying length byte
+        // Hello with a lying length byte (len sits after rated+range in v2)
         let mut lying = buf;
-        lying[14] = 60; // len > 32
+        lying[18] = 60; // len > 32
         assert_eq!(decode(&lying[..n]), None);
-        // Wrong version
+        // Wrong version: hard equality — v1 and any future version rejected.
         let mut wrong_ver = buf;
-        wrong_ver[4] = 2;
+        wrong_ver[4] = 1;
+        assert_eq!(decode(&wrong_ver[..n]), None);
+        wrong_ver[4] = 3;
         assert_eq!(decode(&wrong_ver[..n]), None);
     }
 }

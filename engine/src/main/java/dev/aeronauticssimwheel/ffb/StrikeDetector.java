@@ -30,7 +30,8 @@ public final class StrikeDetector {
         }
     }
 
-    /** One fired strike, ready to become an event packet. */
+    /** One fired strike, ready to become an event packet. Peak is signed by
+     *  the originating side (left-side strikes negative = counterclockwise). */
     public record Strike(float peakNm, float tauSeconds) {
     }
 
@@ -43,11 +44,17 @@ public final class StrikeDetector {
     }
 
     /**
-     * One substep. @param compressionRateMS fastest steered-mount compression
-     * this substep (m/s, positive = compressing; pass 0 when airborne/idle).
+     * One substep.
+     *
+     * @param compressionRateMS fastest steered-mount compression this substep
+     *                          (m/s, positive = compressing; 0 when airborne/idle)
+     * @param sideSign          that mount's side of the craft centerline
+     *                          (−1 left / +1 right / 0 centerline) — signs the
+     *                          rendered impulse so seams kick toward their side
+     *                          instead of always clockwise
      * @return a strike to send, or null
      */
-    public Strike step(double compressionRateMS, double dtSeconds) {
+    public Strike step(double compressionRateMS, double sideSign, double dtSeconds) {
         sinceLastFire = Math.min(sinceLastFire + dtSeconds, Double.MAX_VALUE);
 
         if (!armed && compressionRateMS < cfg.thresholdMS() / 2) {
@@ -60,7 +67,10 @@ public final class StrikeDetector {
         armed = false;
         sinceLastFire = 0;
         float peak = (float) Math.min(compressionRateMS * cfg.peakNmPerMS(), cfg.maxPeakNm());
-        return new Strike(peak, (float) EventImpulses.DEFAULT_TAU_S);
+        // A centerline mount (sideSign 0) still strikes — alternate is worse
+        // than a fixed sign there; use positive.
+        float sign = sideSign < 0 ? -1f : 1f;
+        return new Strike(sign * peak, (float) EventImpulses.DEFAULT_TAU_S);
     }
 
     public void reset() {

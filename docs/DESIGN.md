@@ -210,16 +210,34 @@ binding — `STEERING`, `THROTTLE`, `BRAKE`, `CLUTCH` — through `AxisProcessor
 pedals may enumerate through the base *or* standalone; "one device owns
 everything" would be wrong either way.
 
-Input sources, in priority order (`WheelInput`):
+Input sources (`WheelInput`) — devices **compose per axis**, because the
+bridge carries no pedal axes and pedal sets may enumerate separately:
 
 1. **Demo** (K key) — a sine-sweep fake device; the whole chain runs with no
    hardware attached.
-2. **Bridge** — when the sidecar is running, its STATE stream is the input
-   *and* the torque path (one device, one truth).
-3. **GLFW** — Minecraft's own LWJGL joystick API, input only, polled on the
-   render thread.
+2. **Bridge** — when the sidecar is running, its STATE stream is the steering
+   input *and* the torque path — **plus a GLFW joystick provides
+   throttle/brake/clutch into the same adapter** (steering from the wheelbase,
+   pedals from the pedal set).
+3. **GLFW** — Minecraft's own LWJGL joystick API, input only (steering +
+   pedals, no FFB), polled on the render thread. A pedal-set-only rig binds
+   just the pedals and leaves steering to the keyboard.
 
-Device buttons 2–9 map to `BTN_1..8` (0/1 are ENGAGE and DETENT_MODIFIER).
+With several joysticks attached (wheelbase + standalone pedal set — e.g. a
+Simagic P700 or MOZA SR-P on their own USB), the scan keeps them apart: the
+**pedal device** is picked by the config's `bindings.pedalDevice` substring,
+else a name containing "pedal", else pedal shape (≥2 axes, zero buttons —
+a wheelbase always carries rim buttons); the **primary device** is the
+first joystick that isn't the pedal set.
+
+Pedals use full-travel unipolar shaping (rest at raw −1 reads 0 — the old
+bipolar map + clamp silently discarded half the physical travel), with a
+bottom deadzone and per-axis index/inversion from the feel config's
+`[bindings]` section. Axis indices default to AUTO (−2): a dedicated pedal
+set counts throttle/brake/clutch from axis 0, pedals sharing the wheel's
+device sit after its steering axis at 1/2/3; −1 disables a pedal and an
+explicit index wins. Device buttons 2–9 map to `BTN_1..8` (0/1 are ENGAGE
+and DETENT_MODIFIER).
 
 ### 5.2 Occupancy: the seat is the mutex
 
@@ -368,48 +386,67 @@ per wheel, keyed by the latched driver.
 
 1. **`GroundTelemetrySampler` + `GroundTorqueModel` (cars — primary,
    shipped).** The game's own tire math, read from the wheel mounts on the
-   wheel's craft every physics substep: self-aligning torque from the
-   lateral term `v_side × 0.6 × μ × load` reflected through the steering
-   geometry (kingpin τ = −F_lat × trail, column τ = kingpin × ∂yaw/∂column —
-   the negative ratio, sign-pinned by unit test); bump/strike texture from
-   suspension extension rate; per-block friction (ice fudged 0.1 → mud
-   0.25 → default 1.0) scales everything for free. A mount backdrives the
-   column iff it has seen a steering signal while the rig is live (the
-   sticky-flag heuristic; explicit links refine it). **Honesty notes: the
+   wheel's craft every physics substep, emitted as a **component frame** per
+   substep (see §6.3): self-aligning torque from the lateral term
+   `v_side × 0.6 × μ × load` reflected through the steering geometry
+   (kingpin τ = −F_lat × trail, column τ = kingpin × ∂yaw/∂column — the
+   negative ratio, sign-pinned by unit test); **differential** bump texture
+   from suspension extension rate, signed by each mount's side of the craft
+   centerline (a square-on speed bump cancels; a one-wheel pothole tugs
+   toward its side); per-mount slip proxy (`|v_side|/|v_forward|`), min-μ,
+   craft speed and drive RPM as frame context. Per-block friction (ice
+   fudged 0.1 → mud 0.25 → default 1.0) scales everything for free. A mount
+   backdrives the column iff explicitly linked (links override everything)
+   or — with no links — it has seen a steering signal within the last 5 s
+   (the old sticky-forever heuristic made rear-steer wiring permanently
+   backdrive the column). Craft collisions (horizontal Δv spikes) fire
+   bipolar impulse events toward the struck side. **Honesty notes: the
    game's brake is a linear drag — no lockup, no combined slip — so there is
    no lockup cue to render, and we don't fake one. Braking produces no net
    column torque on these mounts (the drag force is parallel to the trail
    arm and symmetric scrub moments cancel), so the model carries no brake
    term. The model's `gain` owns the unit conversion — Offroad forces are
    not newtons; calibrated to the reference race car (strength 180 →
-   strengthMul ≈ 3600 ⇒ ≈1–2 Nm sustained cornering).**
-2. **`CraftStateSource` (cues)** — craft velocity/accel scalars for damper
-   scaling and rumble triggers. Folded into the Phase 2c feel pass with its
-   consumers.
-3. **`ServoTorqueSource` / joint impulses (planes)** — parked with kinetic
+   strengthMul ≈ 3600 ⇒ ≈1–2 Nm sustained cornering). Craft-to-craft
+   character differences are preserved (absolute physics); a per-block
+   `FFB_TRIM` on the wheel BE trims outliers.**
+2. **`ServoTorqueSource` / joint impulses (planes)** — parked with kinetic
    output (Phase 4); PD reconstruction on swivel-bearing servos per the
-   original design record.
+   original design record. (The old `CraftStateSource` idea is subsumed by
+   the frame's context channels — speed/μ/rpm ship with every sample.)
 
-### 6.3 Telemetry wire (shipped end to end)
+### 6.3 Telemetry wire (shipped end to end, v2: component frames)
 
-Per-substep torque samples ring-buffer in the wheel BE's sampler, flushed
-each game tick as `FfbTelemetryPacket` (base server-time + uniform substep
-dt + sample array, length-capped at 64) — the irFFB trick: a 40+ Hz torque
-signal reconstructed from 20 Hz packets. Suspension-compression transients
-bypass batching as immediate `FfbEventPacket`s (`StrikeDetector`: threshold +
-hysteresis + min-interval; peak hard-capped, clamped again on receipt),
-treated strictly as local-synthesis triggers (`EventImpulses`). Client-side,
-both packet types pass a per-type rate gate before any work is enqueued —
-a hostile or buggy server cannot flood the main-thread executor.
+Per-substep **component frames** ring-buffer in the wheel BE's sampler,
+flushed each game tick as `FfbTelemetryPacket` (base server-time + each
+sample's true offset + six channels: SAT at reference trail, differential
+texture, speed, slip proxy, μ, drive RPM; length-capped at 64) — the irFFB
+trick, a 40+ Hz signal reconstructed from 20 Hz packets, except the client
+now receives *ingredients*, not a pre-mixed torque: every feel decision
+(gains, understeer shaping, synthesis) lives client-side in the
+hot-reloadable tuning. Suspension-compression transients and craft
+collisions bypass batching as immediate bipolar `FfbEventPacket`s
+(`StrikeDetector`: threshold + hysteresis + min-interval, signed by
+originating side; peak hard-capped, clamped again on receipt), treated
+strictly as local-synthesis triggers (`EventImpulses`). Client-side, both
+packet types pass a per-type token-bucket rate gate before any work is
+enqueued — a hostile or buggy server cannot flood the main-thread executor.
+Mis-ordered sample offsets are clamped at decode, not thrown (a decoder
+throw would drop the connection over a feel packet); the sampler also
+guards its timeline monotonic at the source.
 
 ### 6.4 Reconstruction
 
-`TelemetryBuffer`: samples land on a server-time axis; playback runs 75 ms
-delayed with linear interpolation; on a gap it extrapolates the last slope
-for ≤100 ms, then fades to zero over 200 ms — never hold a stale torque;
-recovery re-ramps over 100 ms. The pipeline maps the server timeline onto
-the client's monotonic clock with an EMA'd offset; the playback delay
-absorbs tick jitter.
+`TelemetryBuffer` (multi-channel): samples land on a server-time axis;
+playback runs delayed with linear interpolation; on a gap the torque
+channels extrapolate the last slope for ≤100 ms, then fade to zero over
+200 ms — never hold a stale torque; recovery re-ramps over 100 ms. Context
+channels (speed/slip/μ/rpm) hold instead of fading — their consumers gate
+on staleness rather than reacting to a fabricated zero. The pipeline maps
+the server timeline onto the client's monotonic clock with an EMA'd offset.
+The playback delay is **adaptive**: 25 ms + 4× the EMA'd batch-arrival
+jitter (integrated server ≈ 25–35 ms, jittery remote grows toward 150 ms),
+pinnable via `playbackDelayMs`.
 
 ### 6.5 Client: the FFB composition
 
@@ -417,45 +454,63 @@ absorbs tick jitter.
 the offline driving harness all run this exact class:
 
 ```
-telemetry (TelemetryBuffer, ×telemetryGain)
-  + soft lock (SoftLock: stiff spring + one-way damper past ±lock)
-  + damper + friction (FeelEffects — baseline so the wheel never feels dead)
-  + strike impulses (EventImpulses — decaying transients)
-  → Mixer → SoftKnee (knee at 65 % of the clamp, 3:1 — proportional near
-    the limit instead of a wall)
+SAT (frame) × understeer trail collapse (slip) × telemetryGain
+  + differential texture (frame) × textureGain
+  + surface texture synth (μ class + speed — gravel granular, ice glassy)
+  + drivetrain rumble synth (drive RPM)
+  + damper (speed-scaled, floored) + friction (parking boost at standstill)
+  + strike/collision impulses (EventImpulses — decaying bipolar transients)
+  → SoftKnee (knee at 65 % of the clamp, 3:1 — proportional near the limit)
+  + soft lock (OUTSIDE the knee: an end stop is a wall, not compressed)
   → SafetyChain (§7 — last, unbypassable)
 ```
 
+**The understeer cue is synthesized, deliberately**: Offroad's lateral force
+is linear in slip velocity — it never saturates, so pushing past real-tire
+grip would only make the wheel heavier. Trail is this design's own parameter
+(the game has none), so it collapses with the frame's slip proxy exactly the
+way real pneumatic trail does — the game's forces still turn the craft
+untouched; only the rendered weight lightens. Synthesis inputs are always
+real game state (μ, speed, RPM), individually tunable and zeroable.
+
 Everything is Nm at the steering column. Ingress is hygienic by
-construction: posted telemetry clamps to ±50 Nm, events to ±3 Nm with
-bounded decay constants, and non-finite values are dropped — a hostile
-server can make the wheel feel bad, never unsafe. Engage edges are derived
-inside `step()`; a falling edge clears telemetry, impulses and the clock
+construction: frame channels clamp per-field at ingress (±50 Nm SAT,
+±20 Nm texture, bounded context), events to ±3 Nm with bounded decay
+constants, and non-finite values are dropped — a hostile server can make
+the wheel feel bad, never unsafe. Engage edges are derived inside `step()`;
+a falling edge clears telemetry, impulses, synth state and the clock
 offset; a FAULT survives tuning changes and clears only via deliberate
-disengage → re-engage.
+disengage → re-engage. A commissioning **test-signal generator** (L key:
+sine sweep 0.5–16 Hz / ±0.6 Nm step) replaces the feel content while active
+— soft lock and SafetyChain stay live — for polarity checks and measuring
+the real chain's response on hardware.
 
 Retired/parked components, kept deliberately: **SyncSpring** existed to
 render the stock wheel's 16 RPM slew lag — direct authority has no lag; it
 returns with kinetic output (Phase 4) to render *actual* kinetic-consumer
-lag, alongside **VirtualWheelPredictor**. Detents/buffet/rumble synth are
-Phase 2c/4 feel-pass items.
+lag, alongside **VirtualWheelPredictor**.
 
-What the hands feel on a car, and why it's honest (all emergent from the
-game's own formulas): the wheel loads up with speed and grip; goes light
-exactly when the front tires saturate (understeer cue); pulls into a rear
+What the hands feel on a car (emergent from the game's formulas, rendered
+honestly): the wheel loads up with speed and grip; goes light as the front
+axle slides (the synthesized trail collapse — see above); pulls into a rear
 slide (countersteer cue — the lateral term reverses); goes instantly light
-on ice (μ→0.1 floor); kicks on curbs (strike events); loses aligning torque
-under braking only via load transfer, not lockup (none exists in the game).
+on ice (μ→0.1 floor) and glassy-silent (texture keys off μ); reads gravel
+as granular texture; kicks on curbs toward the struck side (signed strikes);
+thumps on collisions; hums with the drivetrain; weighs heavy at parking
+speeds and frees up as the craft rolls.
 
 ### 6.6 Device output — the native bridge sidecar
 
-The AWFB protocol (localhost UDP, port 46910, little-endian, magic `AWFB`)
-lives in `engine/hal/bridge` on the Java side and `sidecar/src/protocol.rs`
-as a byte-for-byte mirror (golden-vector-pinned in both languages): HELLO
-handshake (device name, rated torque — validated 0.5…30 Nm on receipt),
+The AWFB protocol **v2** (localhost UDP, port 46910, little-endian, magic
+`AWFB`, hard version match — bridge and mod ship together) lives in
+`engine/hal/bridge` on the Java side and `sidecar/src/protocol.rs` as a
+byte-for-byte mirror (golden-vector-pinned in both languages): HELLO
+handshake (device name, rated torque — validated 0.5…30 Nm on receipt —
+and the sidecar's `--range`, so both ends scale the angle identically),
 TORQUE frames carrying the mod's own cap + watchdog interval, STATE at
-250 Hz (steering deg/vel, buttons, FLAG_FAULT), START/STOP, PANIC latched
-until START.
+250 Hz (steering deg/vel, buttons, FLAG_FAULT + **FLAG_ARMED** — the mod
+can see a disarmed session and re-arm promptly instead of waiting out
+timeouts), START/STOP, PANIC latched until START.
 
 **Backend decision (2026-08-14): platform-native PID stacks, not the MOZA
 SDK.** The SDK is access-gated (RESEARCH.md §2) while the R9 is a standard
@@ -470,14 +525,22 @@ The sidecar's own safety layers (independent of the mod's SafetyChain,
 hardened through three rounds of adversarial review) are specified in
 [`sidecar/README.md`](../sidecar/README.md) — the short version: double
 clamp (frame cap + `--max-torque` ceiling, non-finite fails closed),
+bridge-side output shaping (**one coalesced device write per tick**, a
+200 ms ramp after each re-arm, and an independent `--max-slew` limiter —
+every zeroing path bypasses both: an instant zero is always safe),
 bridge-side watchdog with a bounded socket-drain budget, wrap-aware sequence
 gating, a **finite 250 ms effect lease only ever played while confirmed
 torque is nonzero** (an OS-accepted write is not proof the USB transfer
 landed — the policy time-bounds both loss directions), parameter quarantine
 on unconfirmed writes, escalating stop/erase on a failed zero, and a
 connection-epoch DISARM on every device loss *and* return so a stale START
-can never carry over to a re-attached wheel. `FLAG_FAULT` in STATE reports
-output-path integrity loss; the client treats its rising edge as a panic.
+can never carry over to a re-attached wheel (Windows re-applies
+autocenter-off + range before re-acquiring — a driver restoring autocenter
+would be torque outside every software clamp). `FLAG_FAULT` in STATE reports
+output-path integrity loss; the client treats its rising edge as a panic;
+`FLAG_ARMED` makes session state observable. Note the sidecar's PANIC/epoch
+latches self-clear via the mod's automatic START probes by design — the
+user-facing deliberate-re-engage gate is the mod's SafetyChain FAULT.
 
 Conformance without hardware: `cargo test` (state machine + golden vectors +
 sim-device physics) plus `SidecarConformanceTest` — the real
@@ -509,7 +572,10 @@ chase).
 The last stage before the device, fixed order, no code path around it:
 master gain + ramp-in on every engagement (500 ms default) → watchdog (stale
 input → fade to zero, never freeze; 150 ms default) → torque clamp (2.5 Nm
-default) → slew-rate limit (25 Nm/s default) → panic conditions (exceptions,
+default) → slew-rate limit (300 Nm/s default — sim-grade: strikes,
+countersteer reversals and the lock wall need hundreds of Nm/s to render;
+the clamp is the primary boundary, and a worst-case full reversal at the
+default clamp is a 17 ms, 5 Nm-swing event) → panic conditions (exceptions,
 device write failures, backend faults, JVM shutdown hook) → FAULT requires
 deliberate re-engage. Focus loss / GUI open = disengage. Changing any
 safety parameter at runtime re-ramps from zero — a config edit can dip
@@ -561,19 +627,32 @@ poll ~1 Hz), range-clamped on load. A parse error keeps the last good tuning
 |---|---|---|
 | `masterGain` | 1.0 | Final scale on everything |
 | `maxTorqueNm` | 2.5 | SafetyChain hard clamp (Nm at the column) |
-| `slewNmPerSec` | 25 | SafetyChain slew limit |
+| `slewNmPerSec` | 300 | SafetyChain slew limit (sim-grade; cap 2000) |
 | `rampInSeconds` | 0.5 | Engage ramp |
 | `watchdogSeconds` | 0.15 | Stale-input fade deadline |
-| `telemetryGain` | 1.0 | Tire-telemetry mix |
-| `damperNmPerDegPerS` | 0.0015 | Baseline damper |
+| `telemetryGain` | 1.0 | SAT (tire self-aligning) mix |
+| `textureGain` | 1.0 | Sampled suspension-texture mix |
+| `damperNmPerDegPerS` | 0.0015 | Damper at full speed scale |
 | `frictionNm` | 0.12 | Baseline friction |
 | `frictionEpsDegPerS` | 5.0 | Friction stiction band |
 | `kneeFraction` | 0.65 | Soft-knee start, as a fraction of the clamp |
 | `kneeRatio` | 3.0 | Compression above the knee |
-| `lockStiffnessNmPerDeg` | 0.5 | Soft-lock spring |
+| `lockStiffnessNmPerDeg` | 3.0 | Soft-lock spring (outside the knee) |
 | `lockDampingNmPerDegPerS` | 0.008 | Soft-lock one-way damper |
+| `understeerDepth` | 0.55 | SAT fraction shed at full slip (0 = off) |
+| `understeerSlipStart` | 0.35 | Slip where the trail collapse begins |
+| `understeerSlipFull` | 1.2 | Slip where it saturates |
+| `damperFloor` | 0.35 | Damper scale at standstill |
+| `damperSpeedRefMS` | 8.0 | Speed for full damper scale |
+| `parkingBoost` | 2.5 | Extra standstill friction (parking scrub) |
+| `parkingSpeedMS` | 3.0 | Speed where the parking boost fades out |
+| `surfaceTextureNm` | 0.35 | Surface-texture synth amplitude (0 = off) |
+| `rumbleNm` | 0.05 | Drivetrain-rumble synth amplitude (0 = off) |
+| `playbackDelayMs` | 0 | Telemetry playback delay (0 = adaptive) |
+| `[bindings]` | AUTO axes | Pedal axes (−2 = auto by device shape, −1 = off), inversion, `pedalDevice` name match |
 
-Device bindings per axis + the config screen remain future work.
+The config screen remains future work; per-axis calibration beyond the
+bindings section comes with it.
 
 ### 10.2 Per-block settings
 
@@ -651,13 +730,28 @@ Shipped, in order (all exit criteria met on the dates given):
   (reviving the dead soft lock), Nm end-to-end, hot-reload feel TOML, health
   check, sidecar signal handling, dead code deleted, and **Phase 3 core:
   mount linking** (§5.5) via the first mixin, A/B-gametested.
+- **The feel overhaul (Phase 2c core)** (2026-08-19, from the feel review):
+  sim-grade SafetyChain defaults (slew 25→300 Nm/s — the old default crushed
+  every transient into mush; harness now pins strike rise-rate); component
+  telemetry frames end-to-end (§6.3) with client-side composition;
+  synthesized understeer trail collapse (§6.5); differential side-signed
+  texture + bipolar strikes + collision impulses; surface-texture and
+  drivetrain-rumble synths; speed-scaled damper + parking friction; adaptive
+  playback delay; **input composition** (bridge steering + GLFW pedals in
+  one adapter, full-travel pedal shaping, clutch bound, `[bindings]` TOML);
+  per-block `FFB_TRIM`; steered-mount links-override + decay; guarded
+  sampler callback + 4 new health probes (11 total); AWFB v2 (HELLO range,
+  FLAG_ARMED) + sidecar batch (sequence-wedge fix, `--max-slew` + re-arm
+  ramp + coalesced writes, DirectInput property re-application + VID/PID
+  rated torque, evdev event-timestamp velocity + wider buttons); test-signal
+  generator (L key); hygiene batch (token-bucket gates, logout eviction,
+  monotonic wire timeline, shutdown hook, version from container).
 
 Remaining, in rough order:
 
-- **Phase 2c — end-to-end reactivity traces**: curb strike < 150 ms to the
-  rim, bump texture tracks block seams, dropout fade/recover — recorded
-  traces committed. Plus the feel pass (bipolar strike shaping, damper
-  scaling by craft state).
+- **Phase 2c — end-to-end reactivity traces**: recorded traces committed
+  (curb strike measured at 20 ms raw-peak→rim in the harness; repeat on
+  hardware).
 - **Phase 2b exit — hardware-in-the-loop**: the four trip series on a real
   R9, per platform, measured numbers committed. Blocked on hardware.
 - **Phase 3 polish**: config screen, per-mount invert, brake bias, art pass.
@@ -677,12 +771,13 @@ Remaining, in rough order:
 | S9 mixin targets drift (method rename, LVT stripped) | Mount linking | `require = 0` → linked mounts behave stock; health check reports `computeYaw`; the brake LVT degrades silently by design — upstream PR for an official float hook is the long-term fix |
 | Server extension semantics (raw distance vs client spring length) drift upstream | Airborne detection, bump texture | Mirrored constants documented at `AIRBORNE_PARKED`; the gametest's nonzero-torque assert trips if grounding breaks |
 | Substep coherence: wheel and mounts are peer actors, so per-substep reads can be one substep stale per mount | ≤1 substep (25 ms) of blur on telemetry texture | Accepted — imperceptible under the 75 ms playback delay; move to `SablePostPhysicsTickEvent` if 2c wants exactness |
-| Strike impulses are monopolar with no per-side attribution | Repeated seams read as directional bias | Accepted for now; the 2c feel pass owns bipolar/positional strike shaping |
+| Side-attribution polarity (which way is "right") unproven on hardware | Strikes/texture could kick toward the wrong side | Single constant flips it (`RIGHT_IS_COUNTERCLOCKWISE_OF_FACING` in the sampler); first HIL trip verifies |
 | Create's kinetic "flicker score" trips on rapid analog link updates | Link-channel feel under fast pedal work | Sends already bounded at ≤20 Hz on-change; if flicker still trips, mirror Tweaked Controllers' scoped config-gated mixin |
 | `getJointImpulses` free-axis semantics (motor impulses unbridged in the rapier fork) | Plane FFB (Phase 4) | Verify empirically then; PD reconstruction needs no new API |
-| Software spring/damper oscillation on direct-drive at high gain | Feel quality | Damper always paired; device-native spring effect is the escape hatch (protocol reserves it) |
+| Software spring/damper oscillation on direct-drive at high gain; hands-off weave through the ~100 ms telemetry loop around a linear tire | Feel quality | Damper always paired and now speed-scaled (stabilizing where weave lives); raise `damperNmPerDegPerS`/`damperSpeedRefMS` on HIL if needed; device-native spring effect is the escape hatch (protocol reserves it) |
 | Sable physics substeps: default 2/tick (40 Hz), server-configurable 1–10 | Telemetry tuning | Wire format is rate-agnostic (per-sample dt) |
-| MOZA pedals enumerate via base vs standalone | Binding UX | Per-axis device binding covers both; verify on hardware |
+| Pedal sets enumerate via base vs standalone (MOZA SR-P, Simagic P700 — the P700's standalone USB identity is unpublished) | Binding UX | Multi-joystick scan separates pedal set from wheelbase (name/shape/`pedalDevice` config); AUTO axes resolve by device shape; verify axis order on hardware |
+| Simagic Alpha EVO: SimPro gain rescales torque; rotation only settable in SimPro; USB pids shared across ratings | Nm calibration + steering scale | Guide pins SimPro gain 100% + rotation 1080; `--rated-torque` required (tailored error); `--range` must match SimPro |
 | evdev has no exclusive-writer equivalent to DirectInput's cooperative level | A second local FF writer can add torque outside our clamp | Accepted — local processes are inside the trust boundary; the UDP port singleton blocks accidental duplicate bridges |
 | Linux physical FFB polarity unproven | First force can pull the wrong way | `--invert-ffb` + hands-off commissioning; the first cornering-force trip verifies sign |
 

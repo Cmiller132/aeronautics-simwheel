@@ -55,6 +55,16 @@ public final class GlfwWheelDevice implements WheelDevice {
         return GLFW.glfwJoystickPresent(jid);
     }
 
+    /** The GLFW joystick slot this wraps (multi-device scans compare these). */
+    public int jid() {
+        return jid;
+    }
+
+    /** Button count from the last poll (0 is the pedal-set shape signature). */
+    public int buttonCount() {
+        return buttons.length;
+    }
+
     @Override
     public String id() {
         return id;

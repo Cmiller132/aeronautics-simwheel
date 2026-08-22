@@ -17,6 +17,7 @@ import dev.ryanhcode.sable.sublevel.system.SubLevelPhysicsSystem;
 import dev.simulated_team.simulated.content.blocks.physics_assembler.PhysicsAssemblerBlockEntity;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.gametest.framework.GameTest;
 import net.minecraft.gametest.framework.GameTestAssertException;
 import net.minecraft.gametest.framework.GameTestHelper;
@@ -436,6 +437,47 @@ public class SimWheelGameTests {
             helper.assertTrue(Math.abs(yaw - expected) < 0.009,
                     "linked mount must chase the FLOAT yaw " + expected
                             + " (quantized would be 0.24435 or 0.27925), got " + yaw);
+            helper.succeed();
+        });
+    }
+
+    /**
+     * The shareable schematic ships the wheel with pre-baked {@code
+     * LinkedMounts} offsets (tools/make_test_structures.py) so float steering
+     * works out of the box — this pins that NBT contract: the exact tag name,
+     * the BlockPos.asLong offset encoding the generator writes, and that
+     * loading it on a live level registers the mounts immediately (the same
+     * loadAdditional path a schematic paste takes). FfbTrim rides along.
+     */
+    @GameTest(template = "race_car", timeoutTicks = 100)
+    @PrefixGameTestTemplate(false)
+    public static void prebaked_mount_links_register_on_load(GameTestHelper helper) {
+        SimSteeringWheelBlockEntity wheel =
+                findBlockEntity(helper, SimSteeringWheelBlockEntity.class, 9, 4, 5);
+        BlockPos wheelAbs = wheel.getBlockPos();
+
+        helper.runAtTickTime(5, () -> {
+            // Exactly what the generator bakes: offsets wheel→front mounts.
+            CompoundTag tag = new CompoundTag();
+            tag.putLongArray("LinkedMounts", new long[]{
+                    new BlockPos(4, -1, -1).asLong(), new BlockPos(4, -1, 1).asLong()});
+            tag.putFloat("FfbTrim", 0.5f);
+            wheel.loadWithComponents(tag, helper.getLevel().registryAccess());
+
+            helper.assertTrue(wheel.linkedMountCount() == 2,
+                    "pre-baked LinkedMounts must load, got " + wheel.linkedMountCount());
+            var expected = java.util.Set.of(
+                    wheelAbs.offset(4, -1, -1), wheelAbs.offset(4, -1, 1));
+            helper.assertTrue(wheel.linkedMountPositions().equals(expected),
+                    "loading must register the mounts immediately: expected "
+                            + expected + ", got " + wheel.linkedMountPositions());
+            for (BlockPos mountPos : expected) {
+                helper.assertTrue(helper.getLevel().getBlockEntity(mountPos)
+                                instanceof dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlockEntity,
+                        "pre-baked offset must land on a real wheel mount at " + mountPos);
+            }
+            helper.assertTrue(wheel.ffbTrim() == 0.5f,
+                    "FfbTrim must load from NBT, got " + wheel.ffbTrim());
             helper.succeed();
         });
     }

@@ -2,6 +2,7 @@ package dev.aeronauticssimwheel.sim;
 
 import dev.aeronauticssimwheel.ffb.FfbPipeline;
 import dev.aeronauticssimwheel.ffb.StrikeDetector;
+import dev.aeronauticssimwheel.ffb.TelemetryFrame;
 
 import java.io.IOException;
 import java.io.PrintWriter;
@@ -37,6 +38,9 @@ public final class DrivingScenarioDemo {
     public static final double DROPOUT_FROM_S = 17.0;
     public static final double DROPOUT_TO_S = 18.0;
     public static final double LOCK_DEG = 450.0;
+    /** Frame context: asphalt-like grip, wheel RPM from a 0.5 m tire at 15 m/s. */
+    public static final double MU = 0.9;
+    public static final double WHEEL_RPM = SPEED_MS / Math.PI * 60.0;
 
     public record TraceRow(double t, double steerCmdDeg, double rawNm,
                            double telemetryNm, double impulseNm, double outNm) {
@@ -82,9 +86,11 @@ public final class DrivingScenarioDemo {
         StrikeDetector strikes = new StrikeDetector(StrikeDetector.Config.defaults());
 
         // Server state
+        record Pending(double t, TelemetryFrame frame) {
+        }
         double serverT = 0.0;
         double latestRawNm = 0.0;
-        java.util.List<double[]> pendingSubsteps = new java.util.ArrayList<>();
+        java.util.List<Pending> pendingSubsteps = new java.util.ArrayList<>();
         double nextTickT = TICK_DT;
         int strikesFired = 0;
 
@@ -93,7 +99,6 @@ public final class DrivingScenarioDemo {
 
         java.util.List<TraceRow> rows = new java.util.ArrayList<>();
         double curbRawPeak = 0.0, curbRawPeakT = Double.NaN;
-        double curbOutPeak = 0.0, curbOutPeakT = Double.NaN;
 
         for (double t = 0.0; t < TOTAL_S; t += CLIENT_DT) {
             double steerCmd = steerCommandDeg(t);
@@ -102,13 +107,21 @@ public final class DrivingScenarioDemo {
             // --- SERVER (runs ahead of the client loop, substep rate) ---
             while (serverT <= t) {
                 // Direct authority: the command IS the column angle (§5.3)
-                latestRawNm = car.substep(SUBSTEP_DT, SPEED_MS, steerCmd);
-                pendingSubsteps.add(new double[]{serverT, latestRawNm});
+                RaceCarFfbSim.SubstepTorques torques =
+                        car.substep(SUBSTEP_DT, SPEED_MS, steerCmd);
+                latestRawNm = torques.totalNm();
+                pendingSubsteps.add(new Pending(serverT, new TelemetryFrame(
+                        (float) torques.satNm(), (float) torques.textureNm(),
+                        (float) SPEED_MS, (float) car.slipProxy(steerCmd),
+                        (float) MU, (float) WHEEL_RPM)));
 
-                // Immediate event path: the fastest-compressing steered corner
-                double compression = Math.max(car.leftCompressionRateMS(),
-                        car.rightCompressionRateMS());
-                StrikeDetector.Strike strike = strikes.step(compression, SUBSTEP_DT);
+                // Immediate event path: the fastest-compressing steered corner,
+                // signed by its side (left = −1, right = +1; curb is right-lane)
+                double compL = car.leftCompressionRateMS();
+                double compR = car.rightCompressionRateMS();
+                double compression = Math.max(compL, compR);
+                double side = compR >= compL ? 1 : -1;
+                StrikeDetector.Strike strike = strikes.step(compression, side, SUBSTEP_DT);
                 if (strike != null && !dropped) {
                     pipeline.postEvent(strike.peakNm(), strike.tauSeconds());
                     strikesFired++;
@@ -118,11 +131,11 @@ public final class DrivingScenarioDemo {
             // Tick flush: deliver the batched substeps as one packet (unless dropped)
             if (t >= nextTickT) {
                 if (!dropped && !pendingSubsteps.isEmpty()) {
-                    for (double[] s : pendingSubsteps) {
-                        pipeline.postTelemetry(s[0], (float) s[1]);
+                    for (Pending s : pendingSubsteps) {
+                        pipeline.postTelemetry(s.t(), s.frame());
                     }
                     pipeline.noteTelemetryBatch(
-                            pendingSubsteps.get(pendingSubsteps.size() - 1)[0], t);
+                            pendingSubsteps.get(pendingSubsteps.size() - 1).t(), t);
                 }
                 pendingSubsteps.clear();
                 nextTickT += TICK_DT;
@@ -140,14 +153,22 @@ public final class DrivingScenarioDemo {
                     curbRawPeak = Math.abs(latestRawNm);
                     curbRawPeakT = t;
                 }
-                if (Math.abs(outNm) > curbOutPeak) {
-                    curbOutPeak = Math.abs(outNm);
-                    curbOutPeakT = t;
-                }
             }
 
             rows.add(new TraceRow(t, steerCmd, latestRawNm,
                     c.telemetryNm(), c.impulseNm(), outNm));
+        }
+
+        // The rim response to THE CURB specifically: peak |out| in a tight
+        // window around the raw peak — a global window max would catch the
+        // bumpy section's tail instead, now that transients render sharply.
+        double curbOutPeak = 0.0, curbOutPeakT = Double.NaN;
+        for (TraceRow row : rows) {
+            if (row.t() >= curbRawPeakT - 0.05 && row.t() <= curbRawPeakT + 0.30
+                    && Math.abs(row.outNm()) > curbOutPeak) {
+                curbOutPeak = Math.abs(row.outNm());
+                curbOutPeakT = row.t();
+            }
         }
         return new Result(rows, curbRawPeakT, curbOutPeakT, strikesFired);
     }

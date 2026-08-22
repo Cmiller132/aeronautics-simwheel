@@ -42,18 +42,30 @@ class SoftKneeAndMixerTest {
     }
 
     @Test
-    void mixerSumsComponentsBelowKnee() {
+    void mixerPassesFeelContentBelowKnee() {
         Mixer mixer = new Mixer(2.5f); // knee at 1.625
-        assertEquals(1.0f, mixer.mix(0.5f, 0.3f, 0.1f, 0.05f, 0.05f), 1e-6f);
+        assertEquals(1.0f, mixer.mix(1.0f, 0f), 1e-6f);
     }
 
     @Test
     void mixerCompressesHeavyLoadProportionally() {
         Mixer mixer = new Mixer(2.5f);
-        float a = mixer.mix(3f, 0f, 0f, 0f, 0f);
-        float b = mixer.mix(6f, 0f, 0f, 0f, 0f);
+        float a = mixer.mix(3f, 0f);
+        float b = mixer.mix(6f, 0f);
         // Still increasing (proportional feel), but compressed
         assertTrue(b > a, "heavier load must still feel heavier");
         assertTrue(b - a < 3f, "growth above knee must be compressed");
+    }
+
+    @Test
+    void lockBypassesTheKnee() {
+        Mixer mixer = new Mixer(2.5f); // knee at 1.625
+        // Feel content deep into compression; the lock adds Nm-for-Nm on top —
+        // an end stop is a wall, not compressed 3:1.
+        float feelOnly = mixer.mix(3f, 0f);
+        float withLock = mixer.mix(3f, -2f);
+        assertEquals(feelOnly - 2f, withLock, 1e-6f, "lock must add uncompressed");
+        // And a lock alone is untouched even far above the knee.
+        assertEquals(-5f, mixer.mix(0f, -5f), 1e-6f);
     }
 }

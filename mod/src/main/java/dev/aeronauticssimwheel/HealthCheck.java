@@ -101,6 +101,46 @@ public final class HealthCheck {
                     + "via the mixin's require=0 if it drifts)";
         }));
 
+        // Hard-linked sampler call sites — a drift here used to surface as a
+        // LinkageError inside Sable's physics callback (now guarded there, but
+        // the health check should say WHY telemetry went dark).
+        results.add(check("S8 mount ScrollValueBehaviour", () -> {
+            WheelMountBlockEntity.class.getMethod("getBehaviour",
+                    com.simibubi.create.foundation.blockEntity.behaviour.BehaviourType.class);
+            if (com.simibubi.create.foundation.blockEntity.behaviour.scrollValue
+                    .ScrollValueBehaviour.TYPE == null) {
+                throw new IllegalStateException("ScrollValueBehaviour.TYPE is null");
+            }
+            return "getBehaviour + ScrollValueBehaviour.TYPE present";
+        }));
+
+        results.add(check("S7 mass tracker reads", () -> {
+            // Match by name + arity: the position parameter is declared as a
+            // JOML interface type (exact-type getMethod would false-alarm).
+            java.util.Arrays.stream(
+                            dev.ryanhcode.sable.api.physics.mass.MassData.class.getMethods())
+                    .filter(x -> x.getName().equals("getInverseNormalMass")
+                            && x.getParameterCount() == 2)
+                    .findFirst().orElseThrow(() -> new NoSuchMethodException(
+                            "MassData.getInverseNormalMass(2 args)"));
+            return "MassData.getInverseNormalMass present";
+        }));
+
+        results.add(check("S7 velocity read", () -> {
+            dev.ryanhcode.sable.Sable.HELPER.getClass().getMethod("getVelocity",
+                    net.minecraft.world.level.Level.class, net.minecraft.world.phys.Vec3.class);
+            return "Sable.HELPER.getVelocity present";
+        }));
+
+        results.add(check("S3 mount facing + tire radius", () -> {
+            if (dev.ryanhcode.offroad.content.blocks.wheel_mount.WheelMountBlock
+                    .HORIZONTAL_FACING == null) {
+                throw new IllegalStateException("WheelMountBlock.HORIZONTAL_FACING is null");
+            }
+            dev.ryanhcode.offroad.content.components.TireLike.class.getMethod("radius");
+            return "HORIZONTAL_FACING + TireLike.radius present";
+        }));
+
         return results;
     }
 

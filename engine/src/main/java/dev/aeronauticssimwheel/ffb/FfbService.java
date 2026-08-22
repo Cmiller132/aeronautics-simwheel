@@ -74,6 +74,8 @@ public final class FfbService {
         this.listener = listener;
     }
 
+    private volatile Thread loopThread;
+
     public void start() {
         if (running) {
             return;
@@ -81,11 +83,30 @@ public final class FfbService {
         running = true;
         Thread t = new Thread(this::loop, "simwheel-ffb");
         t.setDaemon(true);
+        loopThread = t;
         t.start();
     }
 
     public void stop() {
         running = false;
+    }
+
+    /**
+     * Stop and wait briefly for the loop's teardown (device ffbStop) to run —
+     * for JVM shutdown hooks, where a daemon thread would otherwise just die
+     * mid-write and leave the last torque to the backend watchdogs.
+     */
+    public void stopAndJoin(long millis) {
+        running = false;
+        Thread t = loopThread;
+        if (t != null) {
+            LockSupport.unpark(t);
+            try {
+                t.join(millis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /** Game thread, once per client tick. */

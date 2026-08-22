@@ -76,6 +76,31 @@ class DrivingScenarioTest {
     }
 
     @Test
+    void transientsRenderSharplyAtTheRim() {
+        // The feel-review regression this suite previously could not catch:
+        // with the old 25 Nm/s slew default a 3 Nm strike rendered as ~1 Nm of
+        // mush. Sim-grade defaults (300 Nm/s) must let the curb response rise
+        // fast — at least 0.4 Nm within a single 4 ms client step somewhere in
+        // the strike window — and reach a solid peak.
+        double maxRise = 0.0;
+        List<DrivingScenarioDemo.TraceRow> rows = RESULT.rows();
+        double from = RESULT.curbRawPeakT() - 0.05, to = RESULT.curbRawPeakT() + 0.30;
+        double peak = 0.0;
+        for (int i = 1; i < rows.size(); i++) {
+            DrivingScenarioDemo.TraceRow r = rows.get(i);
+            if (r.t() < from || r.t() > to) {
+                continue;
+            }
+            maxRise = Math.max(maxRise,
+                    Math.abs(r.outNm() - rows.get(i - 1).outNm()));
+            peak = Math.max(peak, Math.abs(r.outNm()));
+        }
+        assertTrue(maxRise > 0.4, "strike must crack, not mush — max per-step rise "
+                + maxRise + " Nm/step");
+        assertTrue(peak > 1.5, "curb response peak too soft: " + peak);
+    }
+
+    @Test
     void strikesRenderThroughTheEventPath() {
         assertTrue(RESULT.strikesFired() > 0, "the curb must fire at least one strike event");
         double maxImpulse = RESULT.rows().stream()

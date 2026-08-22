@@ -1,5 +1,7 @@
-//! DirectInput backend: drives any PID force-feedback wheel (MOZA R9 target)
-//! through the classic recipe — enumerate FFB devices, exclusive+background
+//! DirectInput backend: drives any PID force-feedback wheel (MOZA R-series
+//! and Simagic Alpha EVO bases verified as standard DirectInput constant-
+//! force devices; Simagic needs SimPro Manager installed, its FFB gain at
+//! 100%, and `--rated-torque` — see device.rs) through the classic recipe — enumerate FFB devices, exclusive+background
 //! acquisition on a hidden window, autocenter off, one constant-force effect
 //! whose magnitude is updated in place (`DIEP_TYPESPECIFICPARAMS |
 //! DIEP_NORESTART`, the irFFB/SDL-proven path — never recreate the effect per
@@ -18,16 +20,25 @@
 //! - The magnitude cache updates ONLY on a successful write; a failed ZERO
 //!   write escalates to `Stop` + `SendForceFeedbackCommand(STOPALL)` and
 //!   keeps retrying — a stale force must never keep playing silently.
-//! - Rated torque is explicit: hardcoding 9 Nm on a 20 Nm base would double
-//!   every "cap". Known MOZA R-series names default; anything else requires
-//!   `--rated-torque`.
+//! - Acquisition loss re-runs the property gate: re-acquire attempts are
+//!   throttled to ~1 Hz (mirrors evdev's REOPEN_EVERY), and DIPROP_RANGE +
+//!   DIPROP_AUTOCENTER are RE-APPLIED (while unacquired — DirectInput
+//!   refuses property writes on an acquired device) before the Acquire that
+//!   would let the effect leave quarantine: a driver may restore autocenter
+//!   across a re-acquire, which is torque outside every software clamp.
+//! - Rated torque is explicit: USB VID/PID first (DIPROP_VIDPID against the
+//!   shared MOZA table in device.rs — names are localizable, ids are not),
+//!   name matching second, `--rated-torque` required otherwise (hardcoding
+//!   9 Nm on a 20 Nm base would double every "cap").
 //!
 //! Numeric dinput.h constants are defined locally (they are stable ABI);
 //! structs/interfaces come from the `windows` crate.
 
 #![allow(clippy::upper_case_acronyms)]
 
-use crate::device::{resolve_rated_nm, FfbDevice, WheelState};
+use crate::device::{
+    rated_by_usb_id, resolve_rated_nm, resolve_rated_nm_with_usb_id, FfbDevice, WheelState,
+};
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::core::{w, Interface, GUID};
@@ -63,6 +74,8 @@ const DIPH_BYOFFSET: u32 = 1;
 /// dinput.h MAKEDIPROP(n): property "GUIDs" are small integers by ABI.
 const DIPROP_RANGE: *const GUID = 4 as *const GUID;
 const DIPROP_AUTOCENTER: *const GUID = 9 as *const GUID;
+/// Read-only DIPROPDWORD: wVid = LOWORD(dwData), wPid = HIWORD(dwData).
+const DIPROP_VIDPID: *const GUID = 24 as *const GUID;
 const DIPROPAUTOCENTER_OFF: u32 = 0;
 
 const DI_FFNOMINALMAX: i32 = 10_000;
@@ -83,6 +96,10 @@ const GUID_CONSTANT_FORCE: GUID = GUID::from_u128(0x13541C20_8E33_11D0_9AD0_00A0
 /// ≤250 ms after this process stops executing, whatever the reason.
 const EFFECT_DURATION_US: u32 = 250_000;
 const EFFECT_RETRIGGER_EVERY: Duration = Duration::from_millis(100);
+/// Throttle re-acquire attempts after acquisition loss to ~1 Hz (mirrors
+/// the evdev backend's REOPEN_EVERY) — an unplugged base doesn't need 250
+/// Acquire calls per second.
+const REACQUIRE_EVERY: Duration = Duration::from_secs(1);
 
 /// Wire format for GetDeviceState: one absolute axis + 32 buttons.
 #[repr(C)]
@@ -101,6 +118,8 @@ pub struct DirectInputDevice {
     id_hash: u32,
     range_deg: f32,
     rated_nm: f32,
+    /// Kept for the re-acquire path, which re-runs the autocenter gate.
+    ack_autocenter: bool,
     prev_deg: f32,
     vel_deg_per_s: f32,
     /// Suppress the velocity sample right after (re)acquisition — a stale
@@ -125,6 +144,9 @@ pub struct DirectInputDevice {
     /// isn't hammered at loop rate; the first Start after a fresh parameter
     /// write is never delayed by it (the previous attempt is long past).
     last_play_attempt: Option<Instant>,
+    /// Throttles re-acquire attempts to REACQUIRE_EVERY while the device is
+    /// lost. Cleared on recovery so the next loss retries immediately.
+    last_reacquire_attempt: Option<Instant>,
     /// True between detecting acquisition loss and recovering it, so both
     /// transitions bump the epoch exactly once.
     connection_lost: bool,
@@ -228,6 +250,82 @@ fn pump_messages(hwnd: HWND) {
     }
 }
 
+/// Read a whole-device DIPROPDWORD property (e.g. DIPROP_VIDPID).
+fn get_dword_property(device: &IDirectInputDevice8W, prop: *const GUID) -> Option<u32> {
+    let mut dw = DIPROPDWORD {
+        diph: DIPROPHEADER {
+            dwSize: std::mem::size_of::<DIPROPDWORD>() as u32,
+            dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
+            dwObj: 0,
+            dwHow: DIPH_DEVICE,
+        },
+        dwData: 0,
+    };
+    // SAFETY: dw matches the property's documented DIPROPDWORD shape.
+    unsafe { device.GetProperty(prop, &mut dw.diph).ok().map(|()| dw.dwData) }
+}
+
+/// Apply the device properties a driver may silently reset across an
+/// acquisition loss: the symmetric full-scale axis range (the degree mapping
+/// depends on it) and autocenter OFF (a restored autocenter is torque
+/// OUTSIDE every software clamp). Called at open AND before every
+/// re-Acquire — property writes need an unacquired device, so on the
+/// recovery path this runs first, and the effect cannot leave quarantine
+/// until after the Acquire that follows it.
+fn apply_device_properties(
+    device: &IDirectInputDevice8W,
+    ack_autocenter: bool,
+) -> Result<(), String> {
+    unsafe {
+        // Symmetric full-scale range so degree mapping has no ±1-LSB skew.
+        let mut range = DIPROPRANGE {
+            diph: DIPROPHEADER {
+                dwSize: std::mem::size_of::<DIPROPRANGE>() as u32,
+                dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
+                dwObj: 0,
+                dwHow: DIPH_BYOFFSET,
+            },
+            lMin: -32767,
+            lMax: 32767,
+        };
+        device
+            .SetProperty(DIPROP_RANGE, &mut range.diph)
+            .map_err(|e| format!("cannot set the axis range: {e}"))?;
+
+        // The base must not fight the game with its own centering spring.
+        let mut autocenter = DIPROPDWORD {
+            diph: DIPROPHEADER {
+                dwSize: std::mem::size_of::<DIPROPDWORD>() as u32,
+                dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
+                dwObj: 0,
+                dwHow: DIPH_DEVICE,
+            },
+            dwData: DIPROPAUTOCENTER_OFF,
+        };
+        if device
+            .SetProperty(DIPROP_AUTOCENTER, &mut autocenter.diph)
+            .is_err()
+        {
+            eprintln!(
+                "[bridge] !!! could not disable device autocenter via DirectInput.\n\
+                 [bridge] !!! If the base's own centering is active it will fight and\n\
+                 [bridge] !!! add to game torque OUTSIDE every software clamp."
+            );
+            if !ack_autocenter {
+                return Err(
+                    "refusing to drive this device: verify centering is disabled in the \
+                     vendor tool (MOZA Pit House / Simagic SimPro Manager: in-base \
+                     spring, damper and centering at 0), then re-run with \
+                     --ack-autocenter"
+                        .into(),
+                );
+            }
+            eprintln!("[bridge] continuing on --ack-autocenter (operator-acknowledged)");
+        }
+        Ok(())
+    }
+}
+
 impl DirectInputDevice {
     pub fn open(
         index: usize,
@@ -241,7 +339,6 @@ impl DirectInputDevice {
             .get(index)
             .cloned()
             .ok_or_else(|| format!("no FFB device at index {index} (see --list)"))?;
-        let rated_nm = resolve_rated_nm(&name, rated_nm)?;
 
         let hwnd = hidden_window().map_err(|e| e.to_string())?;
         unsafe {
@@ -249,6 +346,27 @@ impl DirectInputDevice {
             di.CreateDevice(&guid, &mut device, None)
                 .map_err(|e| e.to_string())?;
             let device = device.ok_or("CreateDevice returned nothing")?;
+
+            // Rated torque: explicit flag first; then USB VID/PID against
+            // the shared MOZA table (names are localizable and
+            // driver-dependent, ids are not); then name matching; else a
+            // hard error demanding --rated-torque. A Simagic id/name is
+            // recognized but still errs — their ids are shared across
+            // ratings, so the tailored message hands over the exact flag.
+            let rated_nm = match rated_nm {
+                Some(nm) => nm,
+                None => {
+                    let vidpid = get_dword_property(&device, DIPROP_VIDPID);
+                    let by_id = vidpid
+                        .and_then(|dw| rated_by_usb_id((dw & 0xFFFF) as u16, (dw >> 16) as u16));
+                    match (by_id, vidpid) {
+                        (Some(nm), _) => nm,
+                        (None, Some(dw)) => resolve_rated_nm_with_usb_id(
+                            &name, (dw & 0xFFFF) as u16, (dw >> 16) as u16, None)?,
+                        (None, None) => resolve_rated_nm(&name, None)?,
+                    }
+                }
+            };
 
             // Minimal data format: X axis at offset 0, 32 optional buttons.
             let mut objects = [DIOBJECTDATAFORMAT::default(); 33];
@@ -279,49 +397,9 @@ impl DirectInputDevice {
                 .SetCooperativeLevel(hwnd, DISCL_EXCLUSIVE | DISCL_BACKGROUND)
                 .map_err(|e| e.to_string())?;
 
-            // Symmetric full-scale range so degree mapping has no ±1-LSB skew.
-            let mut range = DIPROPRANGE {
-                diph: DIPROPHEADER {
-                    dwSize: std::mem::size_of::<DIPROPRANGE>() as u32,
-                    dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
-                    dwObj: 0,
-                    dwHow: DIPH_BYOFFSET,
-                },
-                lMin: -32767,
-                lMax: 32767,
-            };
-            device
-                .SetProperty(DIPROP_RANGE, &mut range.diph)
-                .map_err(|e| e.to_string())?;
-
-            // The base must not fight the game with its own centering spring.
-            let mut autocenter = DIPROPDWORD {
-                diph: DIPROPHEADER {
-                    dwSize: std::mem::size_of::<DIPROPDWORD>() as u32,
-                    dwHeaderSize: std::mem::size_of::<DIPROPHEADER>() as u32,
-                    dwObj: 0,
-                    dwHow: DIPH_DEVICE,
-                },
-                dwData: DIPROPAUTOCENTER_OFF,
-            };
-            if device
-                .SetProperty(DIPROP_AUTOCENTER, &mut autocenter.diph)
-                .is_err()
-            {
-                eprintln!(
-                    "[bridge] !!! could not disable device autocenter via DirectInput.\n\
-                     [bridge] !!! If the base's own centering is active it will fight and\n\
-                     [bridge] !!! add to game torque OUTSIDE every software clamp."
-                );
-                if !ack_autocenter {
-                    return Err(
-                        "refusing to drive this device: verify centering is disabled in the \
-                         vendor tool (MOZA Pit House), then re-run with --ack-autocenter"
-                            .into(),
-                    );
-                }
-                eprintln!("[bridge] continuing on --ack-autocenter (operator-acknowledged)");
-            }
+            // Range + autocenter — shared with the re-acquire path, which
+            // must re-apply both (a driver may restore autocenter).
+            apply_device_properties(&device, ack_autocenter)?;
 
             device.Acquire().map_err(|e| e.to_string())?;
 
@@ -367,6 +445,7 @@ impl DirectInputDevice {
                 id_hash: hasher,
                 range_deg,
                 rated_nm,
+                ack_autocenter,
                 prev_deg: 0.0,
                 vel_deg_per_s: 0.0,
                 skip_vel_sample: true,
@@ -379,6 +458,7 @@ impl DirectInputDevice {
                 needs_start: false,
                 effect_started_at: None,
                 last_play_attempt: None,
+                last_reacquire_attempt: None,
                 connection_lost: false,
                 epoch: 0,
             };
@@ -546,18 +626,42 @@ impl FfbDevice for DirectInputDevice {
                         self.connection_lost = true;
                         self.epoch = self.epoch.wrapping_add(1);
                     }
-                    if self.device.Acquire().is_ok() {
-                        // Acquisition loss unloads effects: quarantine until
-                        // a zero rewrite confirms, and bump the connection
-                        // epoch — the bridge disarms and requires a fresh
-                        // client START before any torque resumes.
-                        self.needs_start = false;
-                        self.params_valid = false;
-                        self.skip_vel_sample = true;
-                        // Recovery is the second transition — bump again so
-                        // the session disarms on the RETURN as well.
-                        self.connection_lost = false;
-                        self.epoch = self.epoch.wrapping_add(1);
+                    // Throttle recovery attempts to ~1 Hz — an unplugged
+                    // base doesn't need 250 Acquire calls per second
+                    // (mirrors evdev's REOPEN_EVERY).
+                    let now = Instant::now();
+                    let due = self
+                        .last_reacquire_attempt
+                        .is_none_or(|t| now.duration_since(t) >= REACQUIRE_EVERY);
+                    if due {
+                        self.last_reacquire_attempt = Some(now);
+                        // Re-apply DIPROP_RANGE + DIPROP_AUTOCENTER before
+                        // the Acquire (property writes need an unacquired
+                        // device): a driver may restore autocenter across a
+                        // re-acquire — torque outside every software clamp —
+                        // so the properties must be back in force before the
+                        // effect can leave quarantine, which the recovery
+                        // loop only allows after this Acquire succeeds. If
+                        // the gate fails (autocenter refused and not acked),
+                        // we do NOT acquire: better no forces than un-gated
+                        // ones — retried at 1 Hz.
+                        if apply_device_properties(&self.device, self.ack_autocenter).is_ok()
+                            && self.device.Acquire().is_ok()
+                        {
+                            // Acquisition loss unloads effects: quarantine
+                            // until a zero rewrite confirms, and bump the
+                            // connection epoch — the bridge disarms and
+                            // requires a fresh client START before any
+                            // torque resumes.
+                            self.needs_start = false;
+                            self.params_valid = false;
+                            self.skip_vel_sample = true;
+                            self.last_reacquire_attempt = None;
+                            // Recovery is the second transition — bump again
+                            // so the session disarms on the RETURN as well.
+                            self.connection_lost = false;
+                            self.epoch = self.epoch.wrapping_add(1);
+                        }
                     }
                     WheelState {
                         steering_deg: self.prev_deg,

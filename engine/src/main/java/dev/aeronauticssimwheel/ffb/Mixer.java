@@ -1,8 +1,11 @@
 package dev.aeronauticssimwheel.ffb;
 
 /**
- * Sums the feel components in Nm and applies the soft knee (DESIGN.md §6.5).
- * τ_out = softknee(τ_telemetry + τ_spring + τ_damper + τ_friction + τ_effects).
+ * Sums the feel components in Nm, applies the soft knee to the feel content,
+ * then adds the soft-lock torque OUTSIDE the knee (DESIGN.md §6.5):
+ * τ_out = softknee(τ_feel) + τ_lock. The knee's job is keeping heavily loaded
+ * cornering proportional near the limit; an end stop should be a wall, not
+ * compressed 3:1 — the SafetyChain's hard clamp still bounds the total.
  * Working in Nm end-to-end keeps per-craft tuning portable across wheelbases.
  */
 public final class Mixer {
@@ -23,9 +26,12 @@ public final class Mixer {
         this.ratio = ratio;
     }
 
-    public float mix(float telemetryNm, float springNm, float damperNm,
-                     float frictionNm, float effectsNm) {
-        float sum = telemetryNm + springNm + damperNm + frictionNm + effectsNm;
-        return SoftKnee.apply(sum, kneeNm, ratio);
+    /**
+     * @param feelNm summed feel content (telemetry, texture, synths, damper,
+     *               friction, impulses) — knee-compressed
+     * @param lockNm soft-lock end-stop torque — bypasses the knee
+     */
+    public float mix(float feelNm, float lockNm) {
+        return SoftKnee.apply(feelNm, kneeNm, ratio) + lockNm;
     }
 }
